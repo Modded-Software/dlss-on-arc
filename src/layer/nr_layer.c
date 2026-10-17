@@ -87,6 +87,13 @@ typedef pthread_mutex_t nr_mutex_t;
 #define MAX_SWAPCHAINS 8
 #define MAX_IMAGES 8
 
+/* How many processed presents a frame may be from its answer. One is the plain
+ * asynchronous pass: the daemon works on this frame while the game draws the next, and
+ * the answer for the one before is on screen. Two keeps two frames of it in flight, one
+ * per daemon, so a second device works on the frame in between - the two overlap instead
+ * of taking turns, at the price of one more frame of latency. */
+#define PIPE_DEPTH 2
+
 /* Capture and writeback consume the game's waits once, complete on private
  * fences, then present with no remaining waits. Older NR_LAYER_SYNC values are
  * accepted so an older launcher keeps working; both use this single verified path. */
@@ -122,11 +129,16 @@ struct device_data {
 	int have_earlier;
 	unsigned char *outgoing;        /* colour followed by the mask, for one send */
 	VkDeviceSize outgoing_size;
-	/* NR_LAYER_ASYNC: the frame sent on the last processed present, whose answer is read
-	 * on the next one. Zero-initialised devices must not read fd 0 as a request. */
-	int inflight;
-	int inflight_fd;
-	VkDeviceSize inflight_size;
+	/* NR_LAYER_ASYNC: frames sent on recent processed presents, whose answers are read
+	 * later. Processed present k sends through slot `k % PIPE_DEPTH`; the answer read
+	 * from that slot on a later present is for the frame PIPE_DEPTH presents back. With
+	 * PIPE_DEPTH 1 the slot is reused every present and the old answer is read before
+	 * the new frame is sent, exactly as before. Zero-initialised devices must not read
+	 * fd 0 as a request. */
+	int inflight[PIPE_DEPTH];
+	int inflight_fd[PIPE_DEPTH];
+	VkDeviceSize inflight_size[PIPE_DEPTH];
+	unsigned long pipe_k;           /* processed presents since the pipeline started */
 	PFN_vkGetDeviceProcAddr get_device_proc;
 	PFN_vkQueuePresentKHR present;
 	PFN_vkCreateSwapchainKHR create_swapchain;
@@ -157,6 +169,9 @@ static long capture_every;
 static long live_every;
 static int async_live;
 static const char *socket_path;
+/* A second daemon's endpoint, on another device. With NR_LAYER_ASYNC=2 the two are used
+ * in turn so each works while the other does; unset leaves the single-device path. */
+static const char *socket_path_2;
 static const char *trigger_path;
 static int ui_mask;
 
@@ -170,12 +185,12 @@ static int ui_mask;
 /* Sends the request and leaves the connection open: in asynchronous live mode the
  * answer is read on the next present, so the endpoint has to outlive this call.
  * Returns the open link, or -1. */
-static int exchange_send(const void *header, size_t header_size, const void *payload,
-			 size_t payload_size)
+static int exchange_send_to(const char *path, const void *header, size_t header_size,
+			    const void *payload, size_t payload_size)
 {
 	nr_link link;
-	if (nr_link_connect(&link, socket_path) != 0) {
-		fprintf(stderr, "[nr_layer] no daemon at %s\n", socket_path);
+	if (nr_link_connect(&link, path) != 0) {
+		fprintf(stderr, "[nr_layer] no daemon at %s\n", path);
 		return -1;
 	}
 	if (nr_link_write(&link, header, header_size) != 0
@@ -184,6 +199,12 @@ static int exchange_send(const void *header, size_t header_size, const void *pay
 		return -1;
 	}
 	return nr_link_handle(link);
+}
+
+static int exchange_send(const void *header, size_t header_size, const void *payload,
+			 size_t payload_size)
+{
+	return exchange_send_to(socket_path, header, header_size, payload, payload_size);
 }
 
 /* Reads the whole answer and closes the connection, whichever way it ends. */
@@ -211,17 +232,20 @@ static int exchange(const void *header, size_t header_size, const void *payload,
  * the swapchain changes or the device goes. */
 static void drop_inflight(struct device_data *data)
 {
-	if (!data->inflight) return;
-	data->inflight = 0;
-	nr_link link = nr_link_from_handle(data->inflight_fd);
 	unsigned char sink[65536];
-	for (VkDeviceSize got = 0; got < data->inflight_size; ) {
-		size_t want = data->inflight_size - got < sizeof sink
-			      ? (size_t)(data->inflight_size - got) : sizeof sink;
-		if (nr_link_read(&link, sink, want) != 0) break;
-		got += want;
+	for (int s = 0; s < PIPE_DEPTH; s++) {
+		if (!data->inflight[s]) continue;
+		data->inflight[s] = 0;
+		nr_link link = nr_link_from_handle(data->inflight_fd[s]);
+		for (VkDeviceSize got = 0; got < data->inflight_size[s]; ) {
+			size_t want = data->inflight_size[s] - got < sizeof sink
+				      ? (size_t)(data->inflight_size[s] - got) : sizeof sink;
+			if (nr_link_read(&link, sink, want) != 0) break;
+			got += want;
+		}
+		nr_link_close(&link);
 	}
-	nr_link_close(&link);
+	data->pipe_k = 0;
 }
 
 static struct device_data *find_device(VkDevice device)
@@ -766,6 +790,7 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
 		layer_instance = *instance;
 		capture_path = getenv("NR_LAYER_CAPTURE");
 		socket_path = getenv("NR_LAYER_SOCKET");
+		socket_path_2 = getenv("NR_LAYER_SOCKET2");
 		ensure_daemon();
 		trigger_path = getenv("NR_LAYER_TRIGGER");
 		const char *mask = getenv("NR_LAYER_UI_MASK");
@@ -778,8 +803,19 @@ VKAPI_ATTR VkResult VKAPI_CALL nr_CreateInstance(const VkInstanceCreateInfo *inf
 		live_every = live ? strtol(live, NULL, 10) : 0;
 		if (live_every < 0) live_every = 0;
 		const char *pipelined = getenv("NR_LAYER_ASYNC");
-		async_live = live_every > 0 && pipelined && strcmp(pipelined, "0") != 0;
-		if (async_live)
+		async_live = 0;
+		if (live_every > 0 && pipelined && strcmp(pipelined, "0") != 0) {
+			/* 2 keeps two frames in flight, one per daemon; it needs the second
+			 * endpoint, so a lone NR_LAYER_ASYNC=2 without it falls back. */
+			async_live = (strcmp(pipelined, "2") == 0 && socket_path_2
+				      && *socket_path_2) ? 2 : 1;
+		}
+		if (async_live == 2)
+			fprintf(stderr, "[nr_layer] async x2: two daemons (%s, %s) each work "
+				"on every other frame, and each present shows the answer for "
+				"the frame two before it\n",
+				socket_path ? socket_path : "(none)", socket_path_2);
+		else if (async_live)
 			fprintf(stderr, "[nr_layer] async: each processed present shows the answer "
 				"for the one before it, and the daemon works while the game draws\n");
 		if (live_every > 0)
@@ -1310,9 +1346,9 @@ static int process_frame_async(struct device_data *data, struct swapchain_data *
 		return -1;
 	}
 	int answered = 0;
-	if (data->inflight && data->inflight_size == needed) {
-		data->inflight = 0;
-		answered = exchange_receive(data->inflight_fd, data->result, (size_t)needed) == 0;
+	if (data->inflight[0] && data->inflight_size[0] == needed) {
+		data->inflight[0] = 0;
+		answered = exchange_receive(data->inflight_fd[0], data->result, (size_t)needed) == 0;
 		if (!answered)
 			fprintf(stderr, "[nr_layer] the daemon did not answer; frame unchanged\n");
 	} else {
@@ -1323,11 +1359,71 @@ static int process_frame_async(struct device_data *data, struct swapchain_data *
 				       (uint32_t)chain->format };
 		int fd = exchange_send(header, sizeof header, data->mapped, (size_t)needed);
 		if (fd >= 0) {
-			data->inflight = 1;
-			data->inflight_fd = fd;
-			data->inflight_size = needed;
+			data->inflight[0] = 1;
+			data->inflight_fd[0] = fd;
+			data->inflight_size[0] = needed;
 		}
 	}
+	data->pipe_k++;
+	if (!answered) return -1;
+	memcpy(data->mapped, data->result, (size_t)needed);
+	return 0;
+}
+
+/* NR_LAYER_ASYNC=2: two daemons, one per device, each working on every other frame.
+ * Processed present k sends through slot `k % 2` to the daemon that owns it and reads the
+ * answer that daemon holds for the frame two presents back; the frame one present back is
+ * still on the other daemon, computing. A slot is read before it is used again, so a
+ * daemon is never sent a new frame while its previous answer is unread - which would
+ * deadlock, because the daemon writes the whole frame before it can accept anything else.
+ * The cost is one more frame of latency than NR_LAYER_ASYNC=1. */
+static int process_frame_async2(struct device_data *data, struct swapchain_data *chain,
+				VkQueue queue, uint32_t index)
+{
+	VkDeviceSize needed = (VkDeviceSize)chain->extent.width * chain->extent.height * 4;
+	if (ensure_resources(data, needed) || transfer(data, chain, queue, index, 0)) {
+		drop_inflight(data);
+		return -1;
+	}
+	int slot = (int)(data->pipe_k % 2);
+	const char *path = slot ? socket_path_2 : socket_path;
+	int answered = 0;
+	if (data->inflight[slot]) {
+		if (data->inflight_size[slot] == needed) {
+			data->inflight[slot] = 0;
+			answered = exchange_receive(data->inflight_fd[slot], data->result,
+						    (size_t)needed) == 0;
+			if (!answered)
+				fprintf(stderr, "[nr_layer] the daemon did not answer; "
+					"frame unchanged\n");
+		} else {
+			/* The extent changed under this slot: drain and drop it, it fits
+			 * nothing. */
+			data->inflight[slot] = 0;
+			nr_link link = nr_link_from_handle(data->inflight_fd[slot]);
+			unsigned char sink[65536];
+			for (VkDeviceSize got = 0; got < data->inflight_size[slot]; ) {
+				size_t want = data->inflight_size[slot] - got < sizeof sink
+					      ? (size_t)(data->inflight_size[slot] - got)
+					      : sizeof sink;
+				if (nr_link_read(&link, sink, want) != 0) break;
+				got += want;
+			}
+			nr_link_close(&link);
+		}
+	}
+	if (path) {
+		uint32_t header[4] = { 0x304E524Eu, chain->extent.width, chain->extent.height,
+				       (uint32_t)chain->format };
+		int fd = exchange_send_to(path, header, sizeof header, data->mapped,
+					  (size_t)needed);
+		if (fd >= 0) {
+			data->inflight[slot] = 1;
+			data->inflight_fd[slot] = fd;
+			data->inflight_size[slot] = needed;
+		}
+	}
+	data->pipe_k++;
 	if (!answered) return -1;
 	memcpy(data->mapped, data->result, (size_t)needed);
 	return 0;
@@ -1422,8 +1518,11 @@ static VkResult present_locked(VkQueue queue,
 			VkDeviceSize want = (VkDeviceSize)chain->extent.width
 					  * chain->extent.height * 4;
 			if (data->frame_counter % (unsigned long)live_every == 0) {
-				int done = async_live ? process_frame_async(data, chain, queue, index)
-						      : process_frame(data, chain, queue, index);
+				int done = async_live == 2
+						   ? process_frame_async2(data, chain, queue, index)
+						   : async_live
+						         ? process_frame_async(data, chain, queue, index)
+						         : process_frame(data, chain, queue, index);
 				if (done == 0) {
 					data->holding = 1;
 					transfer(data, chain, queue, index, 1);

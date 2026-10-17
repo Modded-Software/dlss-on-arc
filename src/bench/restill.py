@@ -11,10 +11,10 @@ the owner chose, without starting the game again.
     python3 src/bench/restill.py work/mk1cap work/restill/mk1 --set profile=natural
 
 The answers land in OUT through the daemon's own `--dump`, numbered from 001 in the order sent,
-and each `NNN_in` it writes is checked against the frame it was sent. `render_scale` is 1.0 unless set:
-the published stills are taken with the model at full resolution. Every swapchain behind the
-captures so far was B8G8R8A8_UNORM, and the dumps are 8-bit, so the bytes sent are the bytes
-the game sent.
+and each `NNN_in` it writes is checked against the frame it was sent. `render_scale` is 1.0
+unless set: the published stills are taken with the model at full resolution. Every swapchain
+behind the captures so far was B8G8R8A8_UNORM, and the dumps are 8-bit, so the bytes sent are
+the bytes the game sent.
 
 `--native` replays through the C frame library instead - `nr_frame --replay`, which runs the
 daemon's frame through `nr_frame_live` in one process: the same letterbox, render extent and
@@ -25,7 +25,17 @@ to a last bit apart (`notes/phase68`); `src/ref/test_nr_frame_live.py` holds the
 byte for byte.
 
     python3 src/bench/restill.py work/tekken work/restill/tekken --native
+
+`--realtime` keeps the output on the input's clock: the replay runs the model only on the
+frames it can keep up with and numbers the answers from 001 by what it kept, and the video is
+stitched at the rate that preserves the input's duration. It needs `--native`, and the source
+is a folder of `NNN_in.png` at `--input-fps`.
+
+    python3 src/bench/restill.py work/video/ghost-full-rs05/in out --native --realtime \
+        --input-fps 60 --set render_scale=0.5 --copy-to ~/Videos
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -39,15 +49,29 @@ import sys
 import tempfile
 import time
 
-import numpy as np
-
-ROOT = pathlib.Path(__file__).resolve().parents[2]
 import image_io
+import numpy as np
 
 import nr_build
 
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+
 MAGIC = 0x304E524E
 FORMAT_B8G8R8A8 = 44
+
+# the daemon's settings file names, as `nr_frame --replay` spells them
+NATIVE_FLAGS = {
+    "render_scale": "--render-scale",
+    "profile": "--profile",
+    "intensity": "--intensity",
+    "detail_strength": "--detail-strength",
+    "colour_strength": "--colour-strength",
+    "temporal": "--temporal",
+    "hold": "--hold",
+    "release": "--release",
+    "cut_limit": "--cut-limit",
+    "min_extent": "--min-extent",
+}
 
 
 def ffmpeg():
@@ -59,47 +83,21 @@ def stitch(out, fps):
     """Stitch the replay's own PNGs into videos so the result can be watched.
 
     OUT/rendered.mp4 is the answers alone; OUT/compare.mp4 is `NNN_in` beside `NNN_out`,
-    left to right, the game's frame against the model's, so the two can be judged together.
-    Both use the same frame count and fps, so `rendered.mp4` is the thing to watch and
-    `compare.mp4` is what to freeze on when a frame looks wrong.
-    """
+    left to right, the game's frame against the model's, so the two can be judged together."""
     exe = ffmpeg()
     outs = sorted(out.glob("*_out.png"))
     if not outs:
         return
-    seconds = len(outs) / fps
+    clock = [exe, "-y", "-loglevel", "error", "-framerate", str(fps)]
+    tail = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "16"]
     rendered = out / "rendered.mp4"
-    subprocess.run(
-        [
-            exe,
-            "-y",
-            "-loglevel",
-            "error",
-            "-framerate",
-            str(fps),
-            "-i",
-            str(out / "%03d_out.png"),
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-crf",
-            "16",
-            str(rendered),
-        ],
-        check=True,
-    )
-    print(f"  {len(outs)} frames, {seconds:.1f}s -> {rendered}", flush=True)
+    subprocess.run([*clock, "-i", str(out / "%03d_out.png"), *tail, str(rendered)], check=True)
+    print(f"  {len(outs)} frames, {len(outs) / fps:.1f}s -> {rendered}", flush=True)
     if list(out.glob("*_in.png")):
         compare = out / "compare.mp4"
         subprocess.run(
             [
-                exe,
-                "-y",
-                "-loglevel",
-                "error",
-                "-framerate",
-                str(fps),
+                *clock,
                 "-i",
                 str(out / "%03d_in.png"),
                 "-framerate",
@@ -110,17 +108,23 @@ def stitch(out, fps):
                 "[0:v][1:v]hstack=inputs=2[v]",
                 "-map",
                 "[v]",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-crf",
-                "16",
+                *tail,
                 str(compare),
             ],
             check=True,
         )
         print(f"  input | rendered side by side -> {compare}", flush=True)
+
+
+def deliver(out, to):
+    """Copy the stitched videos somewhere they can be watched."""
+    to = pathlib.Path(to).expanduser()
+    to.mkdir(parents=True, exist_ok=True)
+    for name in ("rendered.mp4", "compare.mp4"):
+        source = out / name
+        if source.exists():
+            shutil.copy2(source, to / name)
+            print(f"  {to / name}", flush=True)
 
 
 def frames_of(directory):
@@ -164,21 +168,6 @@ def exchange(path, width, height, payload):
             got += len(piece)
 
 
-# the daemon's settings file names, as `nr_frame --replay` spells them
-NATIVE_FLAGS = {
-    "render_scale": "--render-scale",
-    "profile": "--profile",
-    "intensity": "--intensity",
-    "detail_strength": "--detail-strength",
-    "colour_strength": "--colour-strength",
-    "temporal": "--temporal",
-    "hold": "--hold",
-    "release": "--release",
-    "cut_limit": "--cut-limit",
-    "min_extent": "--min-extent",
-}
-
-
 def git_revision():
     """The commit this run came from, for provenance. Surfaces git's own words if it cannot say."""
     done = subprocess.run(
@@ -187,10 +176,7 @@ def git_revision():
         text=True,
     )
     if done.returncode != 0:
-        print(
-            f"  git rev-parse failed ({done.returncode}): {done.stderr.strip()}",
-            flush=True,
-        )
+        print(f"  git rev-parse failed ({done.returncode}): {done.stderr.strip()}", flush=True)
         return "unknown"
     revision = done.stdout.strip()
     if not revision:
@@ -203,11 +189,8 @@ def frame_times(log_text):
     """The per-frame graph times the replay logged, in ms, and the frame rate they imply.
 
     `nr_frame` prints `... in 0.10s ...` a frame, wrapping only the graph run: PNG read and
-    write sit outside the timer, so the rate here is the model's, not the replay's. The
-    summary line is preferred when the binary prints one; otherwise it is computed from the
-    per-frame lines, which every build prints."""
-    times = [1000.0 * float(m) for m in re.findall(r"\d+x\d+ in (\d+\.\d+)s ", log_text)]
-    return times
+    write sit outside the timer, so the rate here is the model's, not the replay's."""
+    return [1000.0 * float(m) for m in re.findall(r"\d+x\d+ in (\d+\.\d+)s ", log_text)]
 
 
 def statistics_of(times, summary):
@@ -275,33 +258,54 @@ def write_report(out, source, settings, log_text, seconds):
     return report
 
 
-def native(frames, source, out, settings):
-    """The replay through `nr_frame --replay`, then the same check the daemon's gets."""
+def realtime_update_fps(log_text):
+    """The update rate a `--realtime` replay ran at, or None if it was not realtime.
+
+    nr_frame prints `realtime: P of T frames processed, input F fps, update X fps, ...`; X is
+    the cadence the output is to be played at so its duration matches the input's clock."""
+    found = re.search(r"realtime:.*?update ([\d.]+) fps", log_text)
+    return float(found.group(1)) if found else None
+
+
+def native(frames, source, out, settings, realtime=None, input_fps=60.0, pool=0):
+    """The replay through `nr_frame --replay`, then the same check the daemon's gets.
+
+    With `--realtime` the replay keeps only the frames the model could keep up with and
+    numbers them from 001 by what it kept, so the check follows the `src -> out` pairs the
+    replay printed rather than assuming the k-th source is the k-th answer. `pool` decodes
+    that many frames ahead of the model so the model runs back to back on the card."""
     command = [str(nr_build.executable("nr_frame")), "--replay", str(source), str(out)]
     for knob, value in settings.items():
         if knob not in NATIVE_FLAGS:
             raise SystemExit(f"--native has no {knob}; it takes " + ", ".join(sorted(NATIVE_FLAGS)))
-        command += [
-            NATIVE_FLAGS[knob],
-            str(int(value) if knob == "min_extent" else value),
-        ]
+        command += [NATIVE_FLAGS[knob], str(int(value) if knob == "min_extent" else value)]
+    if realtime is not None:
+        command += ["--input-fps", str(input_fps), "--realtime"]
+        if realtime > 0:
+            command.append(str(realtime))
+    if pool > 1:
+        command += ["--pool", str(pool)]
     done = subprocess.run(command, capture_output=True, text=True)
     if done.returncode:
         raise SystemExit("nr_frame --replay failed:\n" + done.stdout + done.stderr)
-    for index, path in enumerate(frames, 1):
-        written = out / f"{index:03d}_in.png"
+    pairs = re.findall(r"^\s*(\d+_in\.png) -> (\d+)_out\.png", done.stdout, re.MULTILINE)
+    if not pairs:
+        raise SystemExit("nr_frame wrote no frames:\n" + done.stdout + done.stderr)
+    for source_name, number in pairs:
+        written = out / f"{number}_in.png"
+        original = source / source_name
         try:
             same = np.array_equal(
                 np.rint(image_io.load(written) * 255.0),
-                np.rint(image_io.load(path) * 255.0),
+                np.rint(image_io.load(original) * 255.0),
             )
         except RuntimeError as error:
             # No ImageMagick: the frames are on disk and the replay logged each one, but the
             # pixels cannot be compared here. Say so once; do not fail a run that succeeded.
-            print(f"  cannot compare {written} to {path}: {error}", flush=True)
+            print(f"  cannot compare {written} to {original}: {error}", flush=True)
             return done.stdout
         if not same:
-            raise SystemExit(f"{written} is not the frame sent from {path}")
+            raise SystemExit(f"{written} is not the frame sent from {original}")
     print(f"  every NNN_in in {out} is the frame it was sent", flush=True)
     return done.stdout
 
@@ -330,12 +334,39 @@ def main():
         default=30.0,
         help="the frame rate the replay's PNGs are stitched back at (default 30)",
     )
+    parser.add_argument("--no-video", action="store_true", help="leave only the PNGs")
     parser.add_argument(
-        "--no-video",
-        action="store_true",
-        help="leave only the PNGs; no rendered.mp4 / compare.mp4",
+        "--realtime",
+        nargs="?",
+        const="auto",
+        default=None,
+        help="drop frames so the output runs on the input's clock; a value fixes the rate, "
+        "no value measures the model's own (needs --native)",
     )
+    parser.add_argument(
+        "--input-fps",
+        type=float,
+        default=60.0,
+        help="the input's own frame rate, for --realtime (default 60)",
+    )
+    parser.add_argument(
+        "--pool",
+        type=int,
+        default=0,
+        help="with --native --realtime: decode this many frames ahead of the model so it runs "
+        "back to back on the card (0 is off)",
+    )
+    parser.add_argument("--copy-to", type=pathlib.Path, help="also copy the videos here")
     args = parser.parse_args()
+    realtime = None
+    if args.realtime is not None:
+        realtime = 0.0 if args.realtime == "auto" else float(args.realtime)
+        if realtime < 0 or not args.input_fps > 0:
+            raise SystemExit("--realtime takes a positive fps or nothing; --input-fps positive")
+        if not args.native:
+            raise SystemExit("--realtime is dropped in the C frame library; add --native")
+    if args.pool and not args.native:
+        raise SystemExit("--pool needs --native")
     settings = {"render_scale": 1.0}
     for item in args.set:
         knob, _, value = item.partition("=")
@@ -350,11 +381,25 @@ def main():
         )
     args.out.mkdir(parents=True, exist_ok=True)
     if args.native:
-        log_text = native(frames, args.source, args.out, settings)
+        log_text = native(
+            frames, args.source, args.out, settings, realtime, args.input_fps, args.pool
+        )
+        # The video runs on the input's clock: with --realtime the frames are played at the
+        # cadence the replay sustained, so `len(frames)/input_fps` seconds of input stay that
+        # many seconds; without it, the caller's --fps both plays and times the output.
+        if realtime is not None:
+            steady = realtime_update_fps(log_text)
+            if steady is None:
+                raise SystemExit("the replay did not report its realtime rate:\n" + log_text)
+            fps, seconds = steady, len(frames) / args.input_fps
+        else:
+            fps, seconds = args.fps, len(frames) / args.fps
         if not args.no_video:
-            stitch(args.out, args.fps)
-        write_report(args.out, args.source, settings, log_text, len(frames) / args.fps)
-        return
+            stitch(args.out, fps)
+        report = write_report(args.out, args.source, settings, log_text, seconds)
+        if args.copy_to:
+            deliver(args.out, args.copy_to)
+        return report
 
     daemon_log = ""
     with tempfile.TemporaryDirectory() as directory:
@@ -426,6 +471,8 @@ def main():
     if not args.no_video:
         stitch(args.out, args.fps)
     write_report(args.out, args.source, settings, daemon_log, len(frames) / args.fps)
+    if args.copy_to:
+        deliver(args.out, args.copy_to)
 
 
 if __name__ == "__main__":

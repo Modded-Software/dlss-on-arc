@@ -44,6 +44,7 @@
 #include <io.h>
 #else
 #include <dirent.h>
+#include <pthread.h>
 #endif
 
 static double now(void) { return nr_now(); }
@@ -190,6 +191,7 @@ static void save_png_bytes(const unsigned char *raw, int height, int width, cons
     png_infop info = png_create_info_struct(png);
     if (!png || !info || setjmp(png_jmpbuf(png))) { fprintf(stderr, "%s: libpng could not write it\n", path); exit(1); }
     png_init_io(png, f);
+    png_set_compression_level(png, 1);      /* the frames feed a video: speed over bytes */
     png_set_IHDR(png, info, (png_uint_32)width, (png_uint_32)height, 8, PNG_COLOR_TYPE_RGB,
                  PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
     png_write_info(png, info);
@@ -379,8 +381,372 @@ static void make_dir(const char *dir)
     if (rc && errno != EEXIST) { perror(dir); exit(1); }
 }
 
+/* --realtime: keep the output on the input's clock by dropping the frames the model cannot
+ * keep up with. The input plays at `input_fps`; a processed frame is due when the input's
+ * own time reaches the next slot, so the number processed per second of input is the rate
+ * the model sustains - `16/60` of the frames for a 60 fps source at 16 fps - and what is
+ * left out is repeated (the stream) or never written (the replay). `rate` is that sustained
+ * rate: 0 measures it from the running mean of each frame's wall time, a positive value
+ * fixes it. The mean is of the model's wall time, not the output's, and it does not change
+ * with the stride, so measuring only the frames that are actually run is enough. */
+typedef struct {
+    int on;
+    double rate;        /* 0: measure; > 0: fixed, frames a second */
+    double input_fps;
+    double next_t;      /* the input time the next processed frame is due */
+    double ema_ms;      /* running mean of a processed frame's wall time */
+    long processed;
+    long held;
+} realtime_pace;
+
+/* 1 to run the model on input frame `index` (0-based), 0 to drop it. Every frame is run
+ * until a rate is known, so the first frames measure the model at stride 1. */
+static int pace_process(realtime_pace *q, long index)
+{
+    if (!q || !q->on) return 1;
+    double t = (double)index / q->input_fps;
+    if (q->rate <= 0) { q->next_t = t; return 1; }      /* measuring */
+    if (t + 1e-9 < q->next_t) return 0;                 /* not due yet: drop */
+    q->next_t = t + 1.0 / q->rate;                      /* due: process and slot the next */
+    return 1;
+}
+
+/* The wall time of a frame that was run, in ms. Folds it into the mean and, until a rate is
+ * fixed, back into the rate - so an auto run follows the machine as it settles. */
+static void pace_record(realtime_pace *q, double ms)
+{
+    if (!q || !q->on) return;
+    q->processed++;
+    q->ema_ms = q->ema_ms > 0 ? 0.9 * q->ema_ms + 0.1 * ms : ms;
+    if (q->rate > 0) return;
+    if (q->processed < 8) return;                       /* a few frames before trusting it */
+    double r = 1000.0 / q->ema_ms;
+    if (r > q->input_fps) r = q->input_fps;
+    if (r < 0.5) r = 0.5;
+    q->rate = r;
+}
+
+/* The rate the replay actually ran at, and how much it dropped. Written to stdout for the
+ * tools (restill.py reads the update rate back to stitch the video on the input's clock). */
+static void pace_report(const realtime_pace *q, size_t total)
+{
+    if (!q || !q->on || !total) return;
+    double update = q->rate > 0 ? q->input_fps * (double)q->processed / (double)total : q->input_fps;
+    double stride = q->processed ? (double)total / (double)q->processed : 0;
+    printf("  realtime: %ld of %zu frames processed, input %.4g fps, update %.3f fps, "
+           "stride %.2f, dropped %ld\n",
+           q->processed, total, q->input_fps, update, stride, q->held);
+    fflush(stdout);
+}
+
+/* The dump's own bytes, not a re-encode: the _in.png of the output is the input the daemon
+ * saw, byte for byte. */
+static int copy_file(const char *from, const char *to)
+{
+    FILE *in = fopen(from, "rb");
+    if (!in) return 1;
+    FILE *out = fopen(to, "wb");
+    if (!out) { fclose(in); return 1; }
+    char buf[1 << 16];
+    int failed = 0;
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, in)) > 0)
+        if (fwrite(buf, 1, n, out) != n) { failed = 1; break; }
+    if (ferror(in)) failed = 1;
+    fclose(in);
+    if (fclose(out)) failed = 1;
+    return failed;
+}
+
+/* One frame of the replay, start to finish, with the model run in the calling thread: read
+ * NNN_in.png `number`, run `live`, write NNN_in.png and NNN_out.png `shown` in `out`. The
+ * model's wall time in ms goes to *ms. The prompt line and the same report the sequential
+ * loop prints. Used for the sequential loop and, under --pool, for the few calibration
+ * frames that set an auto rate before the pipeline takes over. */
+static int replay_frame(nr_frame_live *live, const nr_frame_params *p, const nr_frame_live_settings *s,
+                        const char *source, const char *out, long number, long shown, double *ms)
+{
+    char name[64], path[1200];
+#ifdef _WIN32
+    sprintf_s(name, sizeof name, "%03ld_in.png", number);
+#else
+    snprintf(name, sizeof name, "%03ld_in.png", number);
+#endif
+    join(path, sizeof path, source, name);
+    int height, width;
+    unsigned char *rgb = read_png_bytes(path, &height, &width);
+    if (!rgb) { fprintf(stderr, "%s: unreadable\n", path); return 1; }
+    size_t pixels = (size_t)height * width;
+    /* every swapchain behind the captures so far was B8G8R8A8, and the dumps are 8-bit,
+     * so the bytes sent are the bytes the game sent */
+    unsigned char *bgra = malloc(pixels * 4), *answer = malloc(pixels * 4), *shown_px = malloc(pixels * 3);
+    if (!bgra || !answer || !shown_px) die("out of memory");
+    for (size_t i = 0; i < pixels; i++) {
+        bgra[i * 4 + 0] = rgb[i * 3 + 2]; bgra[i * 4 + 1] = rgb[i * 3 + 1];
+        bgra[i * 4 + 2] = rgb[i * 3 + 0]; bgra[i * 4 + 3] = 255;
+    }
+    nr_frame_live_report r;
+    double started = now();
+    if (nr_frame_live_run(live, p, s, bgra, width, height, 1, answer, &r)) {
+        fprintf(stderr, "%s: nr_frame_live_run: %s\n", path, nr_frame_error());
+        free(rgb); free(bgra); free(answer); free(shown_px);
+        return 1;
+    }
+    double elapsed = now() - started;
+    if (ms) *ms = elapsed * 1e3;
+    for (size_t i = 0; i < pixels; i++) {
+        shown_px[i * 3 + 0] = answer[i * 4 + 2]; shown_px[i * 3 + 1] = answer[i * 4 + 1];
+        shown_px[i * 3 + 2] = answer[i * 4 + 0];
+    }
+    char in_path[1200], out_path[1200], in_name[64], out_name[64];
+#if defined(_WIN32) && __STDC_WANT_SECURE_LIB__
+    sprintf_s(in_name, sizeof in_name, "%03ld_in.png", shown);
+    sprintf_s(out_name, sizeof out_name, "%03ld_out.png", shown);
+#else
+    snprintf(in_name, sizeof in_name, "%03ld_in.png", shown);
+    snprintf(out_name, sizeof out_name, "%03ld_out.png", shown);
+#endif
+    join(in_path, sizeof in_path, out, in_name);
+    join(out_path, sizeof out_path, out, out_name);
+    copy_file(path, in_path);
+    save_png_bytes(shown_px, height, width, out_path);
+    int active_width = r.right - r.left, active_height = r.bottom - r.top;
+    printf("  %s -> %s  %dx%d in %.2fs  change %.5f  %s %.4f  network %dx%d scale %g",
+           name, out_name, width, height, elapsed, r.change,
+           r.with_history ? "history, cut" : "no history, cut", r.cut, r.network_width,
+           r.network_height, (double)s->render_scale);
+    if (s->render_scale < 1.0f && r.render_width != (int)lround((double)active_width * s->render_scale))
+        printf(" (runs as %.3g)", (double)r.render_width / (double)active_width);
+    if (active_width != width || active_height != height)
+        printf("  letterbox %dpx of rows and %dpx of columns skipped", height - active_height,
+               width - active_width);
+    printf("\n");
+    fflush(stdout);
+    free(rgb); free(bgra); free(answer); free(shown_px);
+    return 0;
+}
+
+#ifndef _WIN32
+/* --pool N: the offline replay's prefetch, for a conversion rather than a test. A frame is
+ * one model run with a PNG read in front and a PNG write behind it, and the card idles
+ * through both. Here N decoded frames wait in memory: a few threads read the selected
+ * NNN_in.png files ahead of the model, the replay thread runs the model back to back with
+ * the next frame already decoded, and a few threads write NNN_out.png (and copy NNN_in.png)
+ * behind it. The model then waits on nothing but the card. */
+enum { SLOT_FREE = 0, SLOT_DECODING, SLOT_DECODED, SLOT_MODELED, SLOT_WRITING };
+#define POOL_CALIB 16       /* frames run before an auto rate is trusted */
+#define POOL_DECODERS 6     /* NR_POOL_DECODERS overrides: heavier PNGs want more */
+#define POOL_WRITERS 4      /* NR_POOL_WRITERS overrides */
+
+typedef struct {
+    long pos;                   /* index in the run; -1 when free */
+    long number;                /* the source frame's NNN */
+    int state, h, w;
+    unsigned char *rgb;         /* decoded input, h*w*3, the PNG's byte order */
+    unsigned char *out;         /* the answer, h*w*3 */
+} pool_slot;
+
+typedef struct {
+    nr_frame_live *live;
+    const nr_frame_params *p;
+    const nr_frame_live_settings *s;
+    const char *source, *out;
+    const long *numbers;
+    long count, base;           /* base: the 1-based output number of numbers[0] */
+    int pool, decode_threads, write_threads;
+    pool_slot *slots;
+    pthread_mutex_t m;
+    pthread_cond_t cv;
+    long decode_pos, written;
+    int failed;
+    double *samples;            /* count entries */
+} pool_ctx;
+
+static int pool_slot_of(pool_ctx *c, long pos, int at_least)
+{
+    for (int i = 0; i < c->pool; i++)
+        if (c->slots[i].pos == pos && c->slots[i].state >= at_least) return i;
+    return -1;
+}
+
+/* Reads the selected in.png files, in order, into free slots as they come. */
+static void *pool_decode_thread(void *arg)
+{
+    pool_ctx *c = arg;
+    for (;;) {
+        pthread_mutex_lock(&c->m);
+        int idx = -1;
+        long pos = -1;
+        for (;;) {
+            if (c->failed) { pthread_mutex_unlock(&c->m); return NULL; }
+            if (c->decode_pos >= c->count) { pthread_mutex_unlock(&c->m); return NULL; }
+            for (int i = 0; i < c->pool; i++)
+                if (c->slots[i].state == SLOT_FREE) { idx = i; break; }
+            if (idx >= 0) break;
+            pthread_cond_wait(&c->cv, &c->m);
+        }
+        pos = c->decode_pos++;
+        c->slots[idx].pos = pos;
+        c->slots[idx].number = c->numbers[pos];
+        c->slots[idx].state = SLOT_DECODING;
+        pthread_mutex_unlock(&c->m);
+
+        char name[64], path[1200];
+#ifdef _WIN32
+        sprintf_s(name, sizeof name, "%03ld_in.png", c->slots[idx].number);
+#else
+        snprintf(name, sizeof name, "%03ld_in.png", c->slots[idx].number);
+#endif
+        join(path, sizeof path, c->source, name);
+        int h = 0, w = 0;
+        unsigned char *rgb = read_png_bytes(path, &h, &w);
+        unsigned char *out = rgb ? malloc((size_t)h * w * 3) : NULL;
+
+        pthread_mutex_lock(&c->m);
+        if (!rgb || !out) {
+            c->failed = 1;
+            free(rgb); free(out);
+        } else {
+            c->slots[idx].rgb = rgb; c->slots[idx].out = out;
+            c->slots[idx].h = h; c->slots[idx].w = w;
+            c->slots[idx].state = SLOT_DECODED;
+        }
+        pthread_cond_broadcast(&c->cv);
+        pthread_mutex_unlock(&c->m);
+    }
+}
+
+/* Writes the modeled frames behind the model; the input is copied from the dump, not
+ * re-encoded. */
+static void *pool_write_thread(void *arg)
+{
+    pool_ctx *c = arg;
+    for (;;) {
+        pthread_mutex_lock(&c->m);
+        int idx = -1;
+        for (;;) {
+            if (c->failed) { pthread_mutex_unlock(&c->m); return NULL; }
+            for (int i = 0; i < c->pool; i++)
+                if (c->slots[i].state == SLOT_MODELED) { idx = i; break; }
+            if (idx >= 0) break;
+            if (c->written >= c->count) { pthread_mutex_unlock(&c->m); return NULL; }
+            pthread_cond_wait(&c->cv, &c->m);
+        }
+        pool_slot *slot = &c->slots[idx];
+        long pos = slot->pos, number = slot->number;
+        int h = slot->h, w = slot->w;
+        unsigned char *out = slot->out;
+        slot->state = SLOT_WRITING;
+        pthread_mutex_unlock(&c->m);
+
+        long shown = c->base + pos;             /* 1-based, off the processed frames */
+        char name[64], path[1200], src_name[64], src_path[1200];
+#ifdef _WIN32
+        sprintf_s(name, sizeof name, "%03ld_out.png", shown);
+#else
+        snprintf(name, sizeof name, "%03ld_out.png", shown);
+#endif
+        join(path, sizeof path, c->out, name);
+        save_png_bytes(out, h, w, path);
+#ifdef _WIN32
+        sprintf_s(name, sizeof name, "%03ld_in.png", shown);
+        sprintf_s(src_name, sizeof src_name, "%03ld_in.png", number);
+#else
+        snprintf(name, sizeof name, "%03ld_in.png", shown);
+        snprintf(src_name, sizeof src_name, "%03ld_in.png", number);
+#endif
+        join(path, sizeof path, c->out, name);
+        join(src_path, sizeof src_path, c->source, src_name);
+        copy_file(src_path, path);
+
+        pthread_mutex_lock(&c->m);
+        free(slot->rgb); free(slot->out);
+        slot->rgb = slot->out = NULL; slot->pos = -1; slot->state = SLOT_FREE;
+        c->written++;
+        pthread_cond_broadcast(&c->cv);
+        pthread_mutex_unlock(&c->m);
+    }
+}
+
+/* The replay thread: run the model on the selected frames in order, back to back. */
+static int pool_run(pool_ctx *c)
+{
+    pthread_t *decoders = calloc(c->decode_threads, sizeof *decoders);
+    pthread_t *writers = calloc(c->write_threads, sizeof *writers);
+    if (!decoders || !writers) die("out of memory");
+    for (int i = 0; i < c->decode_threads; i++) pthread_create(&decoders[i], NULL, pool_decode_thread, c);
+    for (int i = 0; i < c->write_threads; i++) pthread_create(&writers[i], NULL, pool_write_thread, c);
+
+    unsigned char *bgra = NULL, *answer = NULL;
+    size_t cap = 0;
+    for (long k = 0; !c->failed && k < c->count; k++) {
+        pthread_mutex_lock(&c->m);
+        int idx;
+        while ((idx = pool_slot_of(c, k, SLOT_DECODED)) < 0) {
+            if (c->failed) break;
+            pthread_cond_wait(&c->cv, &c->m);
+        }
+        if (idx < 0) { pthread_mutex_unlock(&c->m); break; }
+        pool_slot *slot = &c->slots[idx];
+        long pos = slot->pos, number = slot->number;
+        int h = slot->h, w = slot->w;
+        unsigned char *rgb = slot->rgb, *out = slot->out;
+        pthread_mutex_unlock(&c->m);
+
+        size_t pixels = (size_t)h * w;
+        if (pixels * 4 > cap) { cap = pixels * 4; bgra = realloc(bgra, cap); answer = realloc(answer, cap); }
+        if (!bgra || !answer) die("out of memory");
+        for (size_t i = 0; i < pixels; i++) {
+            bgra[i * 4 + 0] = rgb[i * 3 + 2]; bgra[i * 4 + 1] = rgb[i * 3 + 1];
+            bgra[i * 4 + 2] = rgb[i * 3 + 0]; bgra[i * 4 + 3] = 255;
+        }
+        nr_frame_live_report r;
+        double started = now();
+        if (nr_frame_live_run(c->live, c->p, c->s, bgra, w, h, 1, answer, &r)) {
+            fprintf(stderr, "nr_frame_live_run: %s\n", nr_frame_error());
+            c->failed = 1;
+            break;
+        }
+        double elapsed = now() - started;
+        if (c->samples) c->samples[k] = elapsed * 1e3;
+        for (size_t i = 0; i < pixels; i++) {
+            out[i * 3 + 0] = answer[i * 4 + 2]; out[i * 3 + 1] = answer[i * 4 + 1];
+            out[i * 3 + 2] = answer[i * 4 + 0];
+        }
+        pthread_mutex_lock(&c->m);
+        slot->state = SLOT_MODELED;
+        pthread_cond_broadcast(&c->cv);
+        pthread_mutex_unlock(&c->m);
+
+        long shown = c->base + pos;
+        int active_width = r.right - r.left, active_height = r.bottom - r.top;
+        printf("  %03ld_in.png -> %03ld_out.png  %dx%d in %.2fs  change %.5f  %s %.4f  network %dx%d scale %g",
+               number, shown, w, h, elapsed, r.change,
+               r.with_history ? "history, cut" : "no history, cut", r.cut, r.network_width,
+               r.network_height, (double)c->s->render_scale);
+        if (c->s->render_scale < 1.0f && r.render_width != (int)lround((double)active_width * c->s->render_scale))
+            printf(" (runs as %.3g)", (double)r.render_width / (double)active_width);
+        if (active_width != w || active_height != h)
+            printf("  letterbox %dpx of rows and %dpx of columns skipped", h - active_height, w - active_width);
+        printf("\n");
+        fflush(stdout);
+    }
+
+    /* let the writers finish, then wake any thread still parked on a failure */
+    pthread_mutex_lock(&c->m);
+    while (!c->failed && c->written < c->count) pthread_cond_wait(&c->cv, &c->m);
+    if (c->failed) c->failed = 1;
+    pthread_cond_broadcast(&c->cv);
+    pthread_mutex_unlock(&c->m);
+    for (int i = 0; i < c->decode_threads; i++) pthread_join(decoders[i], NULL);
+    for (int i = 0; i < c->write_threads; i++) pthread_join(writers[i], NULL);
+    free(decoders); free(writers); free(bgra); free(answer);
+    return c->failed ? 1 : 0;
+}
+#endif  /* !_WIN32 */
+
 static int replay(nr_frame *frame, const nr_frame_params *p, const nr_frame_live_settings *s,
-                  const char *source, const char *out)
+                  const char *source, const char *out, realtime_pace *pace, int pool)
 {
     struct numbers frames = { 0 };
     if (list_dir(source, collect, &frames)) { perror(source); return 1; }
@@ -409,67 +775,106 @@ static int replay(nr_frame *frame, const nr_frame_params *p, const nr_frame_live
            (double)s->release, (double)s->cut_limit);
     fflush(stdout);
     double *samples = malloc(frames.count * sizeof *samples);
-    for (size_t k = 0; k < frames.count; k++) {
-        char name[64], path[1200];
-#if defined(_WIN32) && __STDC_WANT_SECURE_LIB__
-        sprintf_s(name, sizeof name, "%03ld_in.png", frames.values[k]);
-#else
-        snprintf(name, sizeof name, "%03ld_in.png", frames.values[k]);
-#endif
-        join(path, sizeof path, source, name);
-        int height, width;
-        unsigned char *rgb = read_png_bytes(path, &height, &width);
-        size_t pixels = (size_t)height * width;
-        /* every swapchain behind the captures so far was B8G8R8A8, and the dumps are 8-bit,
-         * so the bytes sent are the bytes the game sent */
-        unsigned char *bgra = malloc(pixels * 4), *answer = malloc(pixels * 4), *shown = malloc(pixels * 3);
-        if (!bgra || !answer || !shown) die("out of memory");
-        for (size_t i = 0; i < pixels; i++) {
-            bgra[i * 4 + 0] = rgb[i * 3 + 2]; bgra[i * 4 + 1] = rgb[i * 3 + 1];
-            bgra[i * 4 + 2] = rgb[i * 3 + 0]; bgra[i * 4 + 3] = 255;
+    long kept = 0;                  /* the processed frames' own 1-based numbering */
+    int rc = 0;
+
+#ifndef _WIN32
+    if (pool > 1) {
+        /* With --realtime the selection is the frames the pace keeps; without it, every frame
+         * is run and the output is the input's own rate. */
+        int select = pace && pace->on;
+        long start = 0;
+        if (select && pace->rate <= 0) {
+            /* An auto rate needs a few frames measured before it is trusted, and those frames
+             * must share the pipeline's history, so they run here first, on `live`. */
+            long cal = (long)frames.count < POOL_CALIB ? (long)frames.count : POOL_CALIB;
+            for (long k = 0; k < cal; k++) {
+                double ms = 0;
+                if (replay_frame(live, p, s, source, out, frames.values[k], kept + 1, &ms)) { rc = 1; goto finish; }
+                if (samples) samples[kept] = ms;
+                kept++;
+                pace_record(pace, ms);
+            }
+            double *warm = malloc((size_t)cal * sizeof *warm);
+            if (warm) { for (long i = 0; i < cal; i++) warm[i] = samples[i];
+                qsort(warm, (size_t)cal, sizeof *warm, compare_double);
+                double med = warm[cal / 2];
+                free(warm);
+                pace->rate = med > 0 ? 1000.0 / med : 1.0;
+                if (pace->rate > pace->input_fps) pace->rate = pace->input_fps;
+                if (pace->rate < 0.5) pace->rate = 0.5;
+            }
+            pace->processed = cal;
+            pace->held = 0;
+            start = cal;
         }
-        nr_frame_live_report r;
-        double started = now();
-        if (nr_frame_live_run(live, p, s, bgra, width, height, 1, answer, &r)) {
-            fprintf(stderr, "%s: nr_frame_live_run: %s\n", path, nr_frame_error());
-            return 1;
+        long cap = (long)frames.count - start + 1;
+        long *list = malloc((size_t)cap * sizeof *list);
+        long n = 0;
+        if (!list) die("out of memory");
+        if (select) {
+            /* The frames the pace would process from `start` on: a fixed rate, so the whole
+             * selection is known before a byte is read. */
+            double next_t = (double)start / pace->input_fps;
+            for (long k = start; k < (long)frames.count; k++) {
+                double t = (double)k / pace->input_fps;
+                if (t + 1e-9 < next_t) continue;
+                list[n++] = frames.values[k];
+                next_t = t + 1.0 / pace->rate;
+            }
+            pace->held += ((long)frames.count - start) - n;
+            pace->processed += n;
+        } else {
+            for (long k = 0; k < (long)frames.count; k++) list[n++] = frames.values[k];
         }
-        double elapsed = now() - started;
-        if (samples) samples[k] = elapsed * 1e3;
-        for (size_t i = 0; i < pixels; i++) {
-            shown[i * 3 + 0] = answer[i * 4 + 2]; shown[i * 3 + 1] = answer[i * 4 + 1];
-            shown[i * 3 + 2] = answer[i * 4 + 0];
+
+        pool_ctx c;
+        memset(&c, 0, sizeof c);
+        c.live = live; c.p = p; c.s = s; c.source = source; c.out = out;
+        c.numbers = list; c.count = n; c.base = kept + 1;
+        c.pool = pool; c.decode_threads = POOL_DECODERS; c.write_threads = POOL_WRITERS;
+        {
+            const char *e = getenv("NR_POOL_DECODERS");
+            if (e && atoi(e) > 0) c.decode_threads = atoi(e);
+            e = getenv("NR_POOL_WRITERS");
+            if (e && atoi(e) > 0) c.write_threads = atoi(e);
         }
-        char in_path[1200], out_path[1200], in_name[64], out_name[64];
-#if defined(_WIN32) && __STDC_WANT_SECURE_LIB__
-        sprintf_s(in_name, sizeof in_name, "%03u_in.png", (unsigned)(k + 1));
-        sprintf_s(out_name, sizeof out_name, "%03u_out.png", (unsigned)(k + 1));
-#else
-        snprintf(in_name, sizeof in_name, "%03u_in.png", (unsigned)(k + 1));
-        snprintf(out_name, sizeof out_name, "%03u_out.png", (unsigned)(k + 1));
-#endif
-        join(in_path, sizeof in_path, out, in_name);
-        join(out_path, sizeof out_path, out, out_name);
-        save_png_bytes(rgb, height, width, in_path);
-        save_png_bytes(shown, height, width, out_path);
-        int active_width = r.right - r.left, active_height = r.bottom - r.top;
-        printf("  %s -> %s  %dx%d in %.2fs  change %.5f  %s %.4f  network %dx%d scale %g",
-               name, out_name, width, height, elapsed, r.change,
-               r.with_history ? "history, cut" : "no history, cut", r.cut, r.network_width,
-               r.network_height, (double)s->render_scale);
-        if (s->render_scale < 1.0f && r.render_width != (int)lround((double)active_width * s->render_scale))
-            printf(" (runs as %.3g)", (double)r.render_width / (double)active_width);
-        if (active_width != width || active_height != height)
-            printf("  letterbox %dpx of rows and %dpx of columns skipped", height - active_height,
-                   width - active_width);
-        printf("\n");
+        c.samples = samples ? samples + kept : NULL;
+        c.slots = calloc((size_t)pool, sizeof *c.slots);
+        if (!c.slots) die("out of memory");
+        for (int i = 0; i < pool; i++) { c.slots[i].pos = -1; c.slots[i].state = SLOT_FREE; }
+        pthread_mutex_init(&c.m, NULL);
+        pthread_cond_init(&c.cv, NULL);
+        printf("  pool: %ld frames to run, %d slots, %d decoders, %d writers\n",
+               n, pool, c.decode_threads, c.write_threads);
         fflush(stdout);
-        free(rgb); free(bgra); free(answer); free(shown);
+        rc = pool_run(&c);
+        pthread_mutex_destroy(&c.m);
+        pthread_cond_destroy(&c.cv);
+        free(c.slots);
+        free(list);
+        kept += n;
+        goto finish;
     }
+#else
+    (void)pool;
+#endif
+
+    for (size_t k = 0; k < frames.count; k++) {
+        if (pace && !pace_process(pace, (long)k)) { pace->held++; continue; }
+        double ms = 0;
+        if (replay_frame(live, p, s, source, out, frames.values[k], kept + 1, &ms)) { rc = 1; goto finish; }
+        pace_record(pace, ms);
+        if (samples) samples[kept] = ms;
+        kept++;
+    }
+
+finish:
     nr_frame_live_close(live);
-    if (samples) { report_frame_times(samples, frames.count); free(samples); }
+    if (samples) { report_frame_times(samples, (size_t)kept); free(samples); }
+    pace_report(pace, frames.count);
     free(frames.values);
-    return 0;
+    return rc;
 }
 
 /* --stream WxH: raw B8G8R8A8 frames on stdin, the answers on stdout, through the same
@@ -478,7 +883,7 @@ static int replay(nr_frame *frame, const nr_frame_params *p, const nr_frame_live
  *   ffmpeg -f rawvideo -pix_fmt bgra -s 1928x1114 -r 60 -i - out.mp4
  * One stderr line a frame: wall ms of the run, and the running mean. */
 static int stream(nr_frame *frame, const nr_frame_params *p, const nr_frame_live_settings *s,
-                  int width, int height)
+                  int width, int height, realtime_pace *pace)
 {
     size_t bytes = (size_t)width * height * 4;
     unsigned char *bgra = malloc(bytes), *answer = malloc(bytes);
@@ -487,26 +892,38 @@ static int stream(nr_frame *frame, const nr_frame_params *p, const nr_frame_live
     if (!live) { fprintf(stderr, "nr_frame_live_open: %s\n", nr_frame_error()); return 1; }
     double total = 0;
     long k = 0;
+    /* Always one frame out per frame in: the frames dropped under --realtime repeat the
+     * last answer, so the container keeps the input's own frame rate and the stream stays
+     * on the input's clock - it is the content that runs slower, not the video. */
     while (fread(bgra, 1, bytes, stdin) == bytes) {
         nr_frame_live_report r;
-        double started = now();
-        if (nr_frame_live_run(live, p, s, bgra, width, height, 1, answer, &r)) {
-            fprintf(stderr, "frame %ld: nr_frame_live_run: %s\n", k + 1, nr_frame_error());
-            return 1;
+        double ms = 0;
+        if (pace_process(pace, k)) {
+            double started = now();
+            if (nr_frame_live_run(live, p, s, bgra, width, height, 1, answer, &r)) {
+                fprintf(stderr, "frame %ld: nr_frame_live_run: %s\n", k + 1, nr_frame_error());
+                return 1;
+            }
+            ms = (now() - started) * 1e3;
+            pace_record(pace, ms);
+        } else {
+            pace->held++;
         }
-        double ms = (now() - started) * 1e3;
         total += ms;
         k++;
         if (fwrite(answer, 1, bytes, stdout) != bytes) { perror("stdout"); return 1; }
-        fprintf(stderr, "frame %ld  %.1f ms  mean %.1f ms (%.2f fps)  network %dx%d  %s\n", k, ms,
-                total / k, 1e3 * k / total, r.network_width, r.network_height,
-                r.with_history ? "history" : "no history");
+        fprintf(stderr, "frame %ld  %s  %.1f ms  mean %.1f ms of a run frame (%.2f fps)\n", k,
+                ms > 0 ? "processed" : "held", ms,
+                pace && pace->processed ? total / pace->processed : 0.0,
+                pace && pace->processed ? 1e3 * pace->processed / total : 0.0);
     }
     fflush(stdout);
     nr_frame_live_close(live);
     free(bgra); free(answer);
     fprintf(stderr, "%ld frames, mean %.1f ms (%.2f fps)  graph time, excludes I/O\n",
-            k, k ? total / k : 0.0, k ? 1e3 * k / total : 0.0);
+            k, pace && pace->processed ? total / pace->processed : 0.0,
+            pace && pace->processed ? 1e3 * pace->processed / total : 0.0);
+    pace_report(pace, (size_t)k);
     return 0;
 }
 
@@ -524,6 +941,14 @@ static void usage(void)
         "                 render scale 1 unless set, the other knobs the daemon's defaults)\n"
         "       nr_frame --stream WxH [the --replay knobs]\n"
         "                (raw BGRA frames stdin -> stdout through the same live frame; per-frame ms on stderr)\n"
+        "       ... --realtime [FPS] [--input-fps F]\n"
+        "                (with --replay/--stream: drop frames so the output runs on the input's clock.\n"
+        "                 No FPS measures the model's own rate and follows it; input-fps is 60.\n"
+        "                 --replay writes one in/out per kept frame; --stream keeps the input's rate\n"
+        "                 and repeats the last answer through the dropped ones)\n"
+        "       ... [--pool N]\n"
+        "                (with --replay --realtime: keep N decoded frames in memory, read ahead of the\n"
+        "                 model and write behind it, so the model runs back to back on the card)\n"
         "       nr_frame --prepare OUT.safetensors [--weights W]\n"
         "                (the weights written with the loaders' layout work done, for faster opens;\n"
         "                 derived from NVIDIA's weights, so never committed or redistributed)\n");
@@ -542,6 +967,10 @@ int main(int argc, char **argv)
     nr_frame_defaults(&p);
     int replaying = 0;
     const char *prepare_out = NULL, *streaming = NULL;
+    int realtime_on = 0;
+    double realtime_rate = 0;   /* 0: measure; > 0: fixed frames a second */
+    double input_fps = 60.0;
+    int pool = 0;               /* --pool N: frames decoded ahead of the model */
     nr_frame_live_settings live;
     nr_frame_live_defaults(&live);
 
@@ -565,6 +994,17 @@ int main(int argc, char **argv)
         else if (!strcmp(a, "--frame-index")) p.frame_index = atoi(NEXT());
         else if (!strcmp(a, "--replay")) replaying = 1;
         else if (!strcmp(a, "--stream")) streaming = NEXT();
+        else if (!strcmp(a, "--realtime")) {
+            realtime_on = 1;
+            realtime_rate = 0;          /* auto: measure the model */
+            if (i + 1 < argc) {         /* an optional rate right after it */
+                char *end;
+                double v = strtod(argv[i + 1], &end);
+                if (end != argv[i + 1] && *end == '\0' && v > 0) { realtime_rate = v; i++; }
+            }
+        }
+        else if (!strcmp(a, "--input-fps")) input_fps = atof(NEXT());
+        else if (!strcmp(a, "--pool")) pool = atoi(NEXT());
         else if (!strcmp(a, "--prepare")) prepare_out = NEXT();
         else if (!strcmp(a, "--render-scale")) live.render_scale = (float)atof(NEXT());
         else if (!strcmp(a, "--temporal")) live.temporal = (float)atof(NEXT());
@@ -620,7 +1060,18 @@ int main(int argc, char **argv)
         int sw, sh;
         if (streaming && (sscanf(streaming, "%dx%d", &sw, &sh) != 2 || sw <= 0 || sh <= 0))
             die("--stream takes WxH");
-        int rc = streaming ? stream(frame, &p, &live, sw, sh) : replay(frame, &p, &live, input, output);
+        realtime_pace pace;
+        memset(&pace, 0, sizeof pace);
+        pace.on = realtime_on;
+        pace.rate = realtime_rate;
+        pace.input_fps = input_fps;
+        if (realtime_on) {
+            if (!(input_fps > 0)) die("--input-fps must be positive");
+            fprintf(stderr, "realtime: %s, input %.4g fps\n",
+                    realtime_rate > 0 ? "a fixed rate" : "measuring the model", input_fps);
+        }
+        int rc = streaming ? stream(frame, &p, &live, sw, sh, &pace)
+                           : replay(frame, &p, &live, input, output, &pace, pool);
         nr_frame_close(frame);
         return rc;
     }

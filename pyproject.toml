@@ -47,7 +47,7 @@ warn_unused_configs = true
 namespace_packages = true
 explicit_package_bases = true
 exclude = [
-    "(?x)(^\\.venv/|^work/|^build/|^__pycache__/|.*\\.egg-info/|^\\.pytest_cache/)",
+    "(?x)(^\\.venv/|^work/|^build/|^notes/|^__pycache__/|.*\\.egg-info/|^\\.pytest_cache/)",
 ]
 # The tree is not annotated yet, so mypy runs here in a deferred mode: the
 # module graph is followed for every file, but the codes that only fire because

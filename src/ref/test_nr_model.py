@@ -355,8 +355,8 @@ def test_geometry():
     ]
     check(
         "and a lower scale never the slower",
-        all(a <= b for a, b in itertools.pairwise(steps))
-        and all(a <= b for a, b in itertools.pairwise(steps)),
+        all(a <= b for a, b in itertools.pairwise(steps[:6]))
+        and all(a <= b for a, b in itertools.pairwise(steps[6:])),
     )
 
 

@@ -1324,7 +1324,7 @@ def main():
     print(
         "runtime options "
         + " ".join(
-            f"{name}={int(getattr(rt, attr))}"
+            f"{name}={int(getattr(rt.config, attr))}"
             for name, attr in (
                 ("NR_BATCH_FFN", "batch_ffn"),
                 ("NR_FUSE_QK", "fuse_qk"),

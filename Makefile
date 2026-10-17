@@ -260,7 +260,7 @@ PNG_CFLAGS ?= $(or $(shell $(PNG_PKG_CONFIG) --cflags libpng),$(if $(PNG_PREFIX)
 PNG_LIBS   ?= $(or $(shell $(PNG_PKG_CONFIG) --libs libpng),$(if $(PNG_PREFIX),-L$(PNG_PREFIX)/lib -lpng -lz -Wl$(COMMA)-rpath$(COMMA)$(PNG_PREFIX)/lib,-lpng -lz))
 COMMA := ,
 work/nr_frame: src/ref/nr_frame_main.c work/libnr_frame$(SO) src/ref/nr_frame.h src/ref/nr_image.h
-	$(CC) -O2 -Wall -Wextra -Isrc/ref $(PNG_CFLAGS) -o $@ $< work/libnr_frame$(SO) -Wl,-rpath,$(CURDIR)/work $(PNG_LIBS) $(DL_LIBS) -lm
+	$(CC) -O2 -Wall -Wextra -Isrc/ref $(PNG_CFLAGS) -o $@ $< work/libnr_frame$(SO) -Wl,-rpath,$(CURDIR)/work $(PNG_LIBS) $(DL_LIBS) -lm -pthread
 # live_rates.py for the C library: the daemon's frame, end to end, in one process
 work/nr_frame_rates: src/bench/nr_frame_rates.c work/libnr_frame$(SO) src/ref/nr_frame.h src/ref/nr_image.h
 	$(CC) -O2 -Wall -Wextra -Isrc/ref -o $@ $< work/libnr_frame$(SO) -Wl,-rpath,$(CURDIR)/work -lm

@@ -105,7 +105,7 @@ def main():
             flush=True,
         )
         fixed = ", ".join(
-            f"{name}={int(getattr(rt, name))}"
+            f"{name}={int(getattr(rt.config, name))}"
             for name in (
                 "batch_ffn",
                 "fuse_qk",
