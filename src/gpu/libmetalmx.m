@@ -222,6 +222,7 @@ int xmx_portable(void) { return dev ? g.portable : -1; }
 /* every Metal path gathers a window-ordered A: the staged or tiled simdgroup kernel, or
  * the tiled portable one */
 int xmx_window_gather(void) { return dev ? 1 : -1; }
+int xmx_qkv_gather(void) { return xmx_window_gather(); }
 const char *xmx_path(void)
 {
 	if (!dev) return "not opened";

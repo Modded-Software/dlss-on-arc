@@ -129,7 +129,7 @@ class FuseConfig(namedtuple("FuseConfig", _FIELDS)):
             # Off where the runtime cannot gather (a lent matrix device without the staged
             # kernel's extension): the partition is then its own pass, as it always was.
             fuse_partition=(
-                os.environ.get("NR_FUSE_PARTITION", "1") != "0" and lib.xmx_window_gather() == 1
+                os.environ.get("NR_FUSE_PARTITION", "1") != "0" and lib.xmx_qkv_gather() == 1
             ),
             # A decoder transition's upsample, scaled skip and add in one pass.
             fuse_transition=os.environ.get("NR_FUSE_TRANSITION", "1") != "0",

@@ -762,7 +762,7 @@ static const char *GEMM_BLK_SRC =
  * computes 16 columns with the shipping FMA core (RM=2, RN=2, unchanged), stages the raw
  * accumulators to shared memory, and after a workgroup barrier one invocation per row
  * normalises its 32 channels in place. The GEMM arithmetic is therefore the shipped one. */
-#define GEMM_QKV_SRC COSINE_TREE \
+#define QKV_COSINE_LOCAL \
 "#ifndef RM\n#define RM 2\n#endif\n" \
 "#ifndef RN\n#define RN 2\n#endif\n" \
 "#define QKV_COLS 32\n" \
@@ -796,7 +796,9 @@ static const char *GEMM_BLK_SRC =
 "    for (uint c = 0u; c < 4u; c++) r[c] = hadd(r[c], r[c + 4u]);\n" \
 "    float norm = fmax(hadd(hadd(r[0], r[2]), hadd(r[1], r[3])), HROUND(COSINE_NORM_FLOOR));\n" \
 "    return HROUND(1.0f / sqrt(norm));\n" \
-"}\n" \
+"}\n"
+
+#define GEMM_QKV_SRC COSINE_TREE QKV_COSINE_LOCAL \
 "__attribute__((intel_reqd_sub_group_size(8)))\n" \
 "__kernel void gemm_qkv(__global const half *A, __global const half *B,\n" \
 "                       __global half *Q, __global half *Kt, __global half *V,\n" \
@@ -867,6 +869,122 @@ static const char *GEMM_BLK_SRC =
 "            if (part == 0u) value = hmul(vit ? hmul(value, VIT_ROOT) : value, scale);\n" \
 "            value = e4m3(value);\n" \
 "            dst[at + d] = (half)value;\n" \
+"        }\n" \
+"    }\n" \
+"}\n"
+
+/* The window-gathered projection with its epilogue fused: the partition's own gather runs
+ * into shared memory inside this kernel, so the window binary is read once and the half
+ * image never goes to memory. One workgroup does a 16-row block and all 3C columns at
+ * once (6 SIMD8 sub-groups, a sub-group a 16-column slice), so the gather is not repeated
+ * per column block. Row m is window m/64, token m%64; its pixel is the partition's own. */
+#define GEMM_QKV_WIN_SRC COSINE_TREE QKV_COSINE_LOCAL \
+"#ifndef RM\n#define RM 2\n#endif\n" \
+"#ifndef RN\n#define RN 2\n#endif\n" \
+"#define QKV_COLS 32\n" \
+"#define QKV_PARTS 3\n" \
+"#define QKV_ASTRIDE 36\n" \
+"__attribute__((intel_reqd_sub_group_size(8)))\n" \
+"__kernel void gemm_qkv(__global const float *ImgF, __global const half *ImgH,\n" \
+"                       __global const half *B,\n" \
+"                       __global half *Q, __global half *Kt, __global half *V,\n" \
+"                       __global const float *Scale,\n" \
+"                       unsigned M, unsigned N, unsigned K,\n" \
+"                       unsigned lda, unsigned ldb, unsigned oa, unsigned ob,\n" \
+"                       unsigned tokens, unsigned heads, unsigned vit,\n" \
+"                       unsigned img_half, unsigned em3,\n" \
+"                       unsigned width, unsigned height, unsigned across, unsigned imgpad)\n" \
+"{\n" \
+"    __local half astg[8 * RM][QKV_ASTRIDE];\n" \
+"    __local float stg[QKV_PARTS][8 * RM][QKV_COLS + 1];\n" \
+"    unsigned lid = get_local_id(0);\n" \
+"    unsigned sg = lid >> 3u, lane = lid & 7u;\n" \
+"    unsigned pair = sg >> 1u, sub = sg & 1u;\n" \
+"    unsigned rows = 8u * RM;\n" \
+"    unsigned row0 = get_group_id(1) * rows;\n" \
+"    unsigned pad_top = imgpad >> 16u, pad_left = imgpad & 0xFFFFu;\n" \
+"    if (lid < rows) {\n" \
+"        unsigned m = row0 + lid;\n" \
+"        unsigned token = m % tokens, window = m / tokens;\n" \
+"        int y = (int)((window / across) * 8u + token / 8u) - (int)pad_top;\n" \
+"        int x = (int)((window % across) * 8u + token % 8u) - (int)pad_left;\n" \
+"        __local half *dst = astg[lid];\n" \
+"        if (y >= 0 && x >= 0 && y < (int)height && x < (int)width) {\n" \
+"            size_t at = ((size_t)y * width + (size_t)x) * K;\n" \
+"            unsigned c = 0u;\n" \
+"            for (; c + 4u <= K; c += 4u) {\n" \
+"                float4 t = img_half ? (float4)vload_half4(0, ImgH + at + c)\n" \
+"                                    : vload4(0, ImgF + at + c);\n" \
+"                if (em3) t = (float4)(e4m3(t.s0), e4m3(t.s1), e4m3(t.s2), e4m3(t.s3));\n" \
+"                dst[c] = (half)t.s0; dst[c + 1u] = (half)t.s1;\n" \
+"                dst[c + 2u] = (half)t.s2; dst[c + 3u] = (half)t.s3;\n" \
+"            }\n" \
+"            for (; c < K; c++) {\n" \
+"                float v = img_half ? (float)ImgH[at + c] : ImgF[at + c];\n" \
+"                if (em3) v = e4m3(v);\n" \
+"                dst[c] = (half)v;\n" \
+"            }\n" \
+"        } else {\n" \
+"            for (unsigned c = 0u; c < K; c++) dst[c] = (half)0.0f;\n" \
+"        }\n" \
+"    }\n" \
+"    barrier(CLK_LOCAL_MEM_FENCE);\n" \
+"    unsigned col = pair * QKV_COLS + sub * (8u * RN);\n" \
+"    float8 acc[RM][RN];\n" \
+"#pragma unroll\n" \
+"    for (unsigned r = 0; r < RM; r++)\n" \
+"#pragma unroll\n" \
+"        for (unsigned c = 0; c < RN; c++) acc[r][c] = (float8)(0.0f);\n" \
+"    for (unsigned k = 0; k < K; k += 8) {\n" \
+"        float bv[RN][8];\n" \
+"#pragma unroll\n" \
+"        for (unsigned c = 0; c < RN; c++) {\n" \
+"            unsigned bcol = col + c * 8 + lane;\n" \
+"#pragma unroll\n" \
+"            for (unsigned j = 0; j < 8; j++)\n" \
+"                bv[c][j] = (float)B[(size_t)(k + j) * ldb + bcol];\n" \
+"        }\n" \
+"#pragma unroll\n" \
+"        for (unsigned r = 0; r < RM; r++)\n" \
+"#pragma unroll\n" \
+"            for (unsigned i = 0; i < 8; i++) {\n" \
+"                float4 lo = vload_half4(0, (__local const half *)&astg[r * 8 + i][k]);\n" \
+"                float4 hi = vload_half4(0, (__local const half *)&astg[r * 8 + i][k + 4]);\n" \
+"                float av[8] = { lo.s0, lo.s1, lo.s2, lo.s3, hi.s0, hi.s1, hi.s2, hi.s3 };\n" \
+"#pragma unroll\n" \
+"                for (unsigned c = 0; c < RN; c++) {\n" \
+"                    float s = acc[r][c][i];\n" \
+"#pragma unroll\n" \
+"                    for (unsigned j = 0; j < 8; j++) s = mad(av[j], bv[c][j], s);\n" \
+"                    acc[r][c][i] = s;\n" \
+"                }\n" \
+"            }\n" \
+"    }\n" \
+"#pragma unroll\n" \
+"    for (unsigned r = 0; r < RM; r++)\n" \
+"#pragma unroll\n" \
+"        for (unsigned i = 0; i < 8; i++)\n" \
+"#pragma unroll\n" \
+"            for (unsigned c = 0; c < RN; c++)\n" \
+"                stg[pair][r * 8 + i][sub * (8 * RN) + c * 8 + lane] = acc[r][c][i];\n" \
+"    barrier(CLK_LOCAL_MEM_FENCE);\n" \
+"    unsigned ep = lid / rows, lr = lid % rows;\n" \
+"    unsigned chunk = ep;\n" \
+"    unsigned part = chunk / heads, head = chunk % heads;\n" \
+"    unsigned m = row0 + lr;\n" \
+"    unsigned at = (((m / tokens) * heads + head) * tokens + (m % tokens)) * 32u;\n" \
+"    if (part == 2u) {\n" \
+"        for (unsigned d = 0; d < 32u; d++) V[at + d] = (half)e4m3(stg[ep][lr][d]);\n" \
+"    } else {\n" \
+"        float reciprocal = vit ? vit_reciprocal_local(stg[ep][lr])\n" \
+"                              : cosine_reciprocal_local(stg[ep][lr]);\n" \
+"        float scale = part == 0u ? HROUND(Scale[head]) : 1.0f;\n" \
+"        __global half *odd = part == 0u ? Q : Kt;\n" \
+"        for (unsigned d = 0; d < 32u; d++) {\n" \
+"            float value = hmul(HROUND(stg[ep][lr][d]), reciprocal);\n" \
+"            if (part == 0u) value = hmul(vit ? hmul(value, VIT_ROOT) : value, scale);\n" \
+"            value = e4m3(value);\n" \
+"            odd[at + d] = (half)value;\n" \
 "        }\n" \
 "    }\n" \
 "}\n"
@@ -1001,6 +1119,11 @@ static const char *GEMM_BLK_SRC =
 #define K_COMPOSED 5
 #define K_GEMM_QKV 6
 #define K_ATTN 7
+/* K_GEMM_QKV's flags: bit 0 is vit (as before); a high bit selects the window-gathered
+ * kernel and the two image bits its loader needs. */
+#define QKV_WIN_FLAG 0x40000000u
+#define QKV_WIN_HALF 0x00010000u
+#define QKV_WIN_EM3  0x00020000u
 
 struct buffer {
 	int used;
@@ -1050,6 +1173,7 @@ static struct {
 	cl_kernel gemm_blk;         /* block-read A + VNNI-packed B (P1) */
 	cl_kernel pack;             /* B -> VNNI fragments for gemm_blk */
 	cl_kernel gemm_qkv;         /* the QKV projection with its epilogue fused (P3) */
+	cl_kernel gemm_qkv_win;     /* the same, gathering its window rows in-kernel (P4) */
 	cl_kernel attn;             /* the window attention finished on-chip (P3) */
 	cl_kernel resident;
 	cl_kernel row;
@@ -1209,6 +1333,7 @@ int xmx_portable(void) { return 0; }
 int xmx_coopmat_n(void) { return g.coopmat_n; }
 int xmx_coopmat_int8_n(void) { return 0; }
 int xmx_window_gather(void) { return 0; }
+int xmx_qkv_gather(void) { return g.gemm_qkv_win ? 1 : 0; }
 size_t xmx_embedded_shader(const char *) { return 0; }
 void xmx_cancel(int on) { (void)on; }
 int xmx_cancelled(void) { return 0; }
@@ -1353,6 +1478,22 @@ int xmx_open(void)
 			g.gemm_qkv = build_kernel(src, oq, "gemm_qkv");
 			if (g.gemm_qkv)
 				g.error[0] = 0;   /* not fatal: the decomposed path stays available */
+			free(src);
+		}
+	}
+	/* The window-gathered projection: the same epilogue, with the partition's gather folded
+	 * into the kernel's own shared-memory stage. A build failure is not fatal: the
+	 * projection keeps the separate partition pass. NR_FUSE_PARTITION=0 turns it off. */
+	if (!(getenv("NR_FUSE_PARTITION") && getenv("NR_FUSE_PARTITION")[0] == '0'
+	      && getenv("NR_FUSE_PARTITION")[1] == '\0')) {
+		size_t n = strlen(CL_COMMON) + strlen(GEMM_QKV_WIN_SRC) + 1;
+		char *src = malloc(n);
+		if (src) {
+			snprintf(src, n, "%s%s", CL_COMMON, GEMM_QKV_WIN_SRC);
+			const char *gx = getenv("XMX_CL_GEMM_OPTS") ? getenv("XMX_CL_GEMM_OPTS") : "";
+			char oq[256];
+			snprintf(oq, sizeof oq, "-D RM=2 -D RN=2 %s", gx);
+			g.gemm_qkv_win = build_kernel(src, oq, "gemm_qkv");
 			free(src);
 		}
 	}
@@ -1825,7 +1966,54 @@ static int run_gemm_qkv(const struct cmd *c)
 	struct buffer *S = slot((int)c->n);
 	if (!A || !B || !Q || !Kb || !V || !S)
 		return fail("gemm_qkv: bad buffer");
-	cl_uint M = c->M, N = c->N, K = c->K, lda = c->lda, ldb = c->ldb;
+	/* The window-gathered form: c->a is the float32/half image, and the kernel gathers its
+	 * own rows. Geometry rides in the free command fields (see xmx_rec_gemm_qkv_window). */
+	if (c->flags & QKV_WIN_FLAG) {
+		if (!g.gemm_qkv_win)
+			return fail("gemm_qkv: window kernel is not built");
+		cl_uint vM = c->M, vN = c->N, vK = c->K, vlda = c->lda, vldb = c->ldb;
+		cl_uint voa = c->oa, vob = c->ob, vtok = c->width, vheads = c->heads;
+		cl_uint vit = c->flags & 1u;
+		cl_uint vhalf = (c->flags & QKV_WIN_HALF) ? 1u : 0u;
+		cl_uint vem3 = (c->flags & QKV_WIN_EM3) ? 1u : 0u;
+		cl_uint vwidth = c->sb, vheight = c->height, vacross = c->across, vpad = c->pad;
+		int j = 0;
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_mem), &A->mem);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_mem), &A->mem);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_mem), &B->mem);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_mem), &Q->mem);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_mem), &Kb->mem);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_mem), &V->mem);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_mem), &S->mem);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vM);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vN);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vK);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vlda);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vldb);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &voa);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vob);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vtok);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vheads);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vit);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vhalf);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vem3);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vwidth);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vheight);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vacross);
+		clSetKernelArg(g.gemm_qkv_win, j++, sizeof(cl_uint), &vpad);
+		size_t wwork[3] = { 48u, (size_t)(vM / 16u), 1u };
+		size_t wgroup[3] = { 48u, 1u, 1u };
+		cl_event wev = NULL;
+		cl_int werr = clEnqueueNDRangeKernel(g.q, g.gemm_qkv_win, 3, NULL, wwork, wgroup,
+						     0, NULL, profiling() ? &wev : NULL);
+		if (werr != CL_SUCCESS)
+			return fail("gemm_qkv window dispatch: %d", werr);
+		if (getenv("XMX_CL_SERIAL"))
+			clFinish(g.q);
+		trace_push(wev, 0);
+		return 0;
+	}
+	unsigned M = c->M, N = c->N, K = c->K, lda = c->lda, ldb = c->ldb;
 	cl_uint oa = c->oa, ob = c->ob, tokens = c->width, heads = c->heads, vit = c->flags;
 	int i = 0;
 	clSetKernelArg(g.gemm_qkv, i++, sizeof(cl_mem), &A->mem);
@@ -2547,6 +2735,24 @@ int xmx_rec_gemm_qkv_window(int image, int weight, int q, int k, int v, int scal
 		return fail("invalid window-gathered QKV projection");
 	if (!slot(image))
 		return fail("QKV projection image is not a live buffer");
+	/* The folded projection: the kernel gathers its own window rows, so the partition pass
+	 * and its half image do not exist. Gated on the kernel building and the block's own
+	 * geometry (32 channels, one head, a 16-row multiple, 8x8 windows). */
+	if (g.gemm_qkv_win && channels == 32u && heads == 1u && (M % 16u) == 0u) {
+		if (g.ncmd >= MAX_CMD)
+			return fail("command list full");
+		struct cmd *cm = new_cmd(K_GEMM_QKV);
+		cm->a = image; cm->b = weight; cm->c = q; cm->d = k; cm->second = v;
+		cm->M = M; cm->N = 3u * channels; cm->K = channels;
+		cm->lda = channels; cm->ldb = 3u * channels; cm->oa = 0; cm->ob = 0;
+		cm->width = tokens; cm->heads = heads;
+		cm->flags = QKV_WIN_FLAG | ((image_mode & 1u) ? QKV_WIN_HALF : 0u)
+			  | ((image_mode & 2u) ? QKV_WIN_EM3 : 0u);
+		cm->height = height; cm->across = across; cm->pad = pad; cm->sb = width;
+		cm->n = (unsigned)scale;
+		cm->stamp = PK(PK_GEMM, 0);
+		return 0;
+	}
 	int win = scratch(SCR_WIN16, (unsigned long long)M * channels * 2u);
 	if (win < 0)
 		return -1;

@@ -1527,6 +1527,8 @@ int xmx_coopmat_int8_n(void) { return g.dev ? g.coopmat_int8_n : 0; }
  * matrix units but no VK_KHR_workgroup_memory_explicit_layout - a host that lent its device
  * without enabling it - has neither, and the caller records the partition pass instead. */
 int xmx_window_gather(void) { return g.dev ? (g.staged_ok || g.portable) : -1; }
+/* The QKV projection's own window gather rides on the same staged kernel here. */
+int xmx_qkv_gather(void) { return xmx_window_gather(); }
 /* One line for a log: which GEMM kernels this device runs, and why. */
 const char *xmx_path(void)
 {

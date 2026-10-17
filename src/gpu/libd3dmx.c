@@ -302,6 +302,7 @@ int xmx_coopmat(void) { return g.dev ? g.coopmat : -1; }
 int xmx_portable(void) { return g.dev ? g.portable : -1; }
 /* the tiled portable kernel gathers a window-ordered A, and it is the only GEMM here */
 int xmx_window_gather(void) { return g.dev ? 1 : -1; }
+int xmx_qkv_gather(void) { return xmx_window_gather(); }
 const char *xmx_path(void)
 {
 	if (!g.dev) return "not opened";

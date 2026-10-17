@@ -36,6 +36,11 @@ int xmx_coopmat_n(void);
  * device is open; Xe2 exposes N=16, Xe-HPG N=8. */
 int xmx_coopmat_int8_n(void);
 int xmx_window_gather(void);
+/* Whether the QKV projection can gather its window rows into its own loads, folding the
+ * partition pass away. On Vulkan/Metal/Direct3D this is the same staged window-gather the
+ * cover kernel provides (`xmx_window_gather()`); OpenCL folds it into a FMA kernel of its
+ * own, so it reports 1 there while `xmx_window_gather()` stays 0 (no staged GEMM). */
+int xmx_qkv_gather(void);
 int xmx_device_lost(void);
 const char *xmx_error(void);
 const char *xmx_device(void);
