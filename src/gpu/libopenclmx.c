@@ -974,17 +974,28 @@ static const char *GEMM_BLK_SRC =
 "    unsigned m = row0 + lr;\n" \
 "    unsigned at = (((m / tokens) * heads + head) * tokens + (m % tokens)) * 32u;\n" \
 "    if (part == 2u) {\n" \
-"        for (unsigned d = 0; d < 32u; d++) V[at + d] = (half)e4m3(stg[ep][lr][d]);\n" \
+"        for (unsigned d = 0; d < 32u; d += 4u) {\n" \
+"            float4 rv = (float4)(e4m3(stg[ep][lr][d]), e4m3(stg[ep][lr][d + 1u]),\n" \
+"                                 e4m3(stg[ep][lr][d + 2u]), e4m3(stg[ep][lr][d + 3u]));\n" \
+"            vstore_half4(rv, 0, V + at + d);\n" \
+"        }\n" \
 "    } else {\n" \
 "        float reciprocal = vit ? vit_reciprocal_local(stg[ep][lr])\n" \
 "                              : cosine_reciprocal_local(stg[ep][lr]);\n" \
 "        float scale = part == 0u ? HROUND(Scale[head]) : 1.0f;\n" \
 "        __global half *odd = part == 0u ? Q : Kt;\n" \
-"        for (unsigned d = 0; d < 32u; d++) {\n" \
-"            float value = hmul(HROUND(stg[ep][lr][d]), reciprocal);\n" \
-"            if (part == 0u) value = hmul(vit ? hmul(value, VIT_ROOT) : value, scale);\n" \
-"            value = e4m3(value);\n" \
-"            odd[at + d] = (half)value;\n" \
+"        for (unsigned d = 0; d < 32u; d += 4u) {\n" \
+"            float s0 = hmul(HROUND(stg[ep][lr][d]), reciprocal);\n" \
+"            float s1 = hmul(HROUND(stg[ep][lr][d + 1u]), reciprocal);\n" \
+"            float s2 = hmul(HROUND(stg[ep][lr][d + 2u]), reciprocal);\n" \
+"            float s3 = hmul(HROUND(stg[ep][lr][d + 3u]), reciprocal);\n" \
+"            if (part == 0u) {\n" \
+"                s0 = hmul(vit ? hmul(s0, VIT_ROOT) : s0, scale);\n" \
+"                s1 = hmul(vit ? hmul(s1, VIT_ROOT) : s1, scale);\n" \
+"                s2 = hmul(vit ? hmul(s2, VIT_ROOT) : s2, scale);\n" \
+"                s3 = hmul(vit ? hmul(s3, VIT_ROOT) : s3, scale);\n" \
+"            }\n" \
+"            vstore_half4((float4)(e4m3(s0), e4m3(s1), e4m3(s2), e4m3(s3)), 0, odd + at + d);\n" \
 "        }\n" \
 "    }\n" \
 "}\n"
