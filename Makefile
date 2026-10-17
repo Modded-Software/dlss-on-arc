@@ -485,6 +485,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	$(PYTHON) src/tools/claims_check.py
 	$(PYTHON) src/tools/build_check.py
 	$(PYTHON) src/tools/test_release.py
+	$(PYTHON) src/tools/test_native_pins.py
 	$(PYTHON) src/bench/frame_profile.py --tables
 	$(PYTHON) src/gpu/test_gpu_telemetry.py
 	$(PYTHON) src/gpu/test_portable.py
@@ -567,7 +568,7 @@ help: ## Show this help
 # =============================================================================
 # Setup
 # =============================================================================
-.PHONY: preflight init install install-ci install-deps install-hooks sync
+.PHONY: preflight init init-check install install-ci install-deps deps-check install-hooks sync
 
 preflight: ## Verify environment
 	test -d "$(CI_DIR)" || { echo "ERROR: CI directory not found at $(CI_DIR)" >&2; exit 1; }
@@ -575,9 +576,16 @@ preflight: ## Verify environment
 	echo "Preflight OK"
 
 
-init: ## Install system-level dependencies
-	echo "TODO: implement per-project system dependencies."
-	:
+# The host packages this build needs, in CI's unified schema. The downloaded
+# inputs are pinned in res/native-pins.json instead; see scripts/fetch_deps.py.
+SYSTEM_DEPS := config/system-deps.yaml
+
+init: ## Install the host system packages (needs root: sudo make init)
+	$(CI_DIR)/scripts/install-system-deps --config $(SYSTEM_DEPS) --install
+
+
+init-check: ## Verify the host system packages without installing
+	$(CI_DIR)/scripts/install-system-deps --config $(SYSTEM_DEPS) --check
 
 
 install: install-deps ## Full install: deps (hooks install separately, root-only: sudo make install-hooks)
@@ -588,9 +596,13 @@ install-ci: install-deps ## CI install: deps only, no hooks
 	:
 
 
-install-deps: ## Install project dependencies
-	echo "TODO: implement per-project dependency install."
-	:
+install-deps: ## Stage the pinned build inputs and the Python environment
+	$(PYTHON) scripts/fetch_deps.py
+	uv sync --extra dev
+
+
+deps-check: ## Verify the pinned build inputs without downloading
+	$(PYTHON) scripts/fetch_deps.py --check
 
 
 install-hooks: ## Install native git hooks (root-only: root-owned, immutable)

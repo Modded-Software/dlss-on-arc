@@ -37,8 +37,7 @@ def load_mlx_numpy_modules(names=MLX_NUMPY_MODULES):
     """Import MLX-DLSS's numpy modules without its torch-laden `__init__`."""
     if not _MLX.is_dir():
         raise SystemExit(
-            f"missing {_MLX}\n"
-            "  git clone --depth 1 https://github.com/iamwavecut/MLX-DLSS work/mlx-dlss"
+            f"missing {_MLX}\n  stage the pinned checkout with: uv run python scripts/fetch_deps.py"
         )
     if "mlxnp" not in sys.modules:
         package = types.ModuleType("mlxnp")

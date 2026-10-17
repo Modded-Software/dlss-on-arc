@@ -31,7 +31,9 @@ Metal (macOS) and Direct3D 12 runtimes implement the same entry points. See
   offers.
 - Your own copy of `nvngx_dlssnr.dll`. The repository contains no NVIDIA binaries and no
   weights.
-- Linux: a C compiler, `glslangValidator`, the Vulkan loader, libpng, Python 3 with NumPy.
+- Linux: a C compiler, `glslangValidator`, the Vulkan loader, libpng, Python 3 with NumPy,
+  declared in `config/system-deps.yaml`, checked by `make init-check` and installed by
+  `sudo make init`.
 - Windows: the release needs a 64-bit Python and your DLL; see
   [docs/RELEASE-QUICKSTART.md](docs/RELEASE-QUICKSTART.md). Building from source:
   [docs/WINDOWS-QUICKSTART.md](docs/WINDOWS-QUICKSTART.md).
@@ -39,13 +41,14 @@ Metal (macOS) and Direct3D 12 runtimes implement the same entry points. See
 ### Build (Linux)
 
 ```sh
-mkdir -p work
-git clone --depth 1 --branch v1.4.321 \
-          https://github.com/KhronosGroup/Vulkan-Headers.git work/vulkan-headers
-git clone https://github.com/iamwavecut/MLX-DLSS.git work/mlx-dlss
-git -C work/mlx-dlss checkout 06a3e11a8b68817127406ace5c764463543f699b
+make install-deps   # stages the pinned inputs from res/native-pins.json into work/
 make
 ```
+
+Every downloaded input - the header trees under `work/deps`, and the Vulkan-Headers and
+MLX-DLSS checkouts - is named with its version and SHA-256, or its commit, in
+[res/native-pins.json](res/native-pins.json); `scripts/fetch_deps.py` refuses anything
+else. The Python dependencies are pinned in `pyproject.toml` and `uv.lock`.
 
 CMake builds the same targets on Linux, macOS, Windows and Android:
 `cmake -S . -B build && cmake --build build && ctest --test-dir build`.

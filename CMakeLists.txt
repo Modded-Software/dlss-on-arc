@@ -209,8 +209,8 @@ else()
     HINTS "${NR_WORK_DIR}/vulkan-headers/include" "$ENV{VULKAN_SDK}/include"
           "$ENV{HOME}/Downloads/vcpkg/installed/arm64-osx/include" /usr/local/include /opt/homebrew/include)
   if(NOT NR_VULKAN_INCLUDE)
-    message(FATAL_ERROR "no Vulkan headers: install the Vulkan SDK, or\n"
-      "  git clone --depth 1 --branch v1.4.321 https://github.com/KhronosGroup/Vulkan-Headers.git work/vulkan-headers")
+    message(FATAL_ERROR "no Vulkan headers: install the Vulkan SDK, or run\n"
+      "  make install-deps   (stages the pinned checkout named in res/native-pins.json)")
   endif()
 endif()
 if(NOT Vulkan_INCLUDE_DIRS)
@@ -1383,6 +1383,7 @@ if(NR_BUILD_TESTS)
       src/gpu/test_joint_qkv.py
       src/gpu/test_gpu_telemetry.py
       src/tools/test_release.py
+      src/tools/test_native_pins.py
       src/ref/test_frame_cache.py src/ref/test_native_image.py src/ref/test_nr_model.py
       src/ref/test_temporal_controls.py)
     foreach(script ${NR_PY_TESTS})

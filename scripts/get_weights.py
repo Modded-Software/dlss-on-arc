@@ -10,15 +10,15 @@ exactly where ``nr_frame.WEIGHTS`` and ``nr_daemon.py`` look for it.
 Steps it performs:
 
 1. Check the DLL you point at exists and is a file.
-2. If ``work/mlx-dlss`` is missing, clone it and pin it to the commit the graph
-   recovery was validated against (``06a3e11a8b68817127406ace5c764463543f699b``).
+2. If ``work/mlx-dlss`` is missing, clone it and pin it to the commit in
+   ``res/native-pins.json`` - the one the graph recovery was validated against.
 3. Run ``extract_dlssnr_weights.py`` then ``unpack_dlssnr_weights.py``.
 4. Verify the logical safetensors landed and has 649 tensors.
 
 Usage:
 
-    python3 scripts/get_weights.py /path/to/nvngx_dlssnr.dll
-    python3 scripts/get_weights.py D:\\games\\nvngx_dlssnr.dll --work-dir work
+    uv run python scripts/get_weights.py /path/to/nvngx_dlssnr.dll
+    uv run python scripts/get_weights.py D:\\games\\nvngx_dlssnr.dll --work-dir work
 
 The project root is located by walking up from this file, so the script works no
 matter where you invoke it from.
@@ -27,18 +27,24 @@ matter where you invoke it from.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MLX_DLSS_URL = "https://github.com/iamwavecut/MLX-DLSS.git"
-MLX_DLSS_PIN = "06a3e11a8b68817127406ace5c764463543f699b"
+PINS = ROOT / "res" / "native-pins.json"
 EXPECTED_TENSORS = 649
 
 # Names of the upstream extractor under work/mlx-dlss/python/mlxdlss/tools/
 EXTRACT = "extract_dlssnr_weights.py"
 UNPACK = "unpack_dlssnr_weights.py"
+
+
+def mlx_pin():
+    """The MLX-DLSS URL and commit, from the one place they are pinned."""
+    entry = json.loads(PINS.read_text(encoding="utf-8"))["checkouts"]["mlx-dlss"]
+    return entry["url"], entry["commit"]
 
 
 def run(cmd, cwd=None):
@@ -59,15 +65,16 @@ def ensure_mlx(work: Path) -> Path:
         sys.exit(
             f"{mlx} exists but has no {EXTRACT} under {tools}.\n"
             "  It looks like a partial copy: the runtime modules without the tools.\n"
-            "  Move it aside, or clone it yourself:\n"
-            f"    git clone {MLX_DLSS_URL} {mlx} && git -C {mlx} checkout {MLX_DLSS_PIN}"
+            "  Move it aside, then stage the pinned checkout with:\n"
+            "    uv run python scripts/fetch_deps.py"
         )
+    url, pin = mlx_pin()
     mlx.mkdir(parents=True, exist_ok=True)
-    print(f"Cloning MLX-DLSS into {mlx} (pinned at {MLX_DLSS_PIN})…")
-    if run(["git", "clone", MLX_DLSS_URL, str(mlx)]).returncode != 0:
-        sys.exit("git clone of MLX-DLSS failed; check your network.")
-    if run(["git", "-C", str(mlx), "checkout", MLX_DLSS_PIN]).returncode != 0:
-        sys.exit(f"could not pin MLX-DLSS at {MLX_DLSS_PIN}.")
+    print(f"Cloning MLX-DLSS into {mlx} (pinned at {pin})…")
+    if run(["git", "clone", url, str(mlx)]).returncode != 0:
+        sys.exit("could not clone MLX-DLSS; check your network.")
+    if run(["git", "-C", str(mlx), "checkout", pin]).returncode != 0:
+        sys.exit(f"could not pin MLX-DLSS at {pin}.")
     if not (tools / EXTRACT).exists():
         sys.exit(f"{EXTRACT} not found under {tools} after clone.")
     return tools
@@ -146,7 +153,7 @@ def main() -> int:
         print(f"\nOK: {logical} - {n} logical tensors. The daemon can now load it.")
 
     print("\nNext: start the daemon, it will find the weights automatically,\nor run a still:")
-    print(f"    python3 {ROOT / 'src' / 'ref' / 'nr_frame.py'} IN.png OUT.png --resident")
+    print(f"    uv run python {ROOT / 'src' / 'ref' / 'nr_frame.py'} IN.png OUT.png --resident")
     return 0
 
 

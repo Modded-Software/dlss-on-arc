@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "comment": "Pinned build inputs for the Linux/Arc path. scripts/fetch_deps.py stages each into work/ and refuses any .deb whose SHA-256, or checkout whose commit, differs from the value here. A deb is fetched at its exact version with apt, so the host's own mirror is used and the hash guards against a mirror serving different bytes. Host packages (a C compiler, glslangValidator, the Vulkan loader) are declared in config/system-deps.yaml instead; language dependencies live in pyproject.toml and uv.lock. This file is only what is downloaded.",
+  "debs": {
+    "libpng-dev": {
+      "version": "1.6.43-5ubuntu0.7",
+      "sha256": "db0d4bc0054ae0061524d009f75bd4409b10f596274f3a9aa07d5e3212812263",
+      "dest": "png"
+    },
+    "libx11-dev": {
+      "version": "2:1.8.7-1build1",
+      "sha256": "1969e200607ffe34070b92fe1bd3ba76ac2e2bd2f3a54530800c5872076fad24",
+      "dest": "x11"
+    },
+    "x11proto-dev": {
+      "version": "2023.2-1",
+      "sha256": "3bf13a2ffb79ecd4014d438936014e5863f79eb59ebf76e8f43356271c90e7ce",
+      "dest": "x11"
+    }
+  },
+  "checkouts": {
+    "vulkan-headers": {
+      "url": "https://github.com/KhronosGroup/Vulkan-Headers.git",
+      "tag": "v1.4.321",
+      "commit": "2cd90f9d20df57eac214c148f3aed885372ddcfe",
+      "dest": "vulkan-headers"
+    },
+    "mlx-dlss": {
+      "url": "https://github.com/iamwavecut/MLX-DLSS.git",
+      "commit": "06a3e11a8b68817127406ace5c764463543f699b",
+      "dest": "mlx-dlss"
+    }
+  }
+}
