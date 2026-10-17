@@ -31,6 +31,7 @@ import time
 import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
+import gpu_telemetry
 import nr_frame_resident as F
 import nr_model
 from xmxrt import profile
@@ -254,11 +255,15 @@ def main():
     while time.perf_counter() < until:
         frame.run(features, execution="single")
     log = record_calls(runtime.lib) if args.calls else None
+    cards = gpu_telemetry.cards()
+    energy_before = {card.name: gpu_telemetry.energy_uj(card) for card in cards}
     profile.profile_reset()
     started = time.perf_counter()
     for _ in range(args.runs):  # exactly --runs timed frames
         head = frame.run(features, execution="single")
-    wall = (time.perf_counter() - started) / args.runs
+    elapsed = time.perf_counter() - started
+    wall = elapsed / args.runs
+    power = gpu_telemetry.frame_power(cards, energy_before, elapsed, args.runs)
 
     totals = profile.profile_totals()
     rows = sorted(
@@ -279,6 +284,12 @@ def main():
         "  %-28s %9.2f  (host: recording, numpy, the rest)"
         % ("- host overhead", wall * 1e3 - device)
     )
+    if power:
+        reading = ", ".join(
+            "%s %.1f W (%.2f J/frame)" % (name, value["w"], value["j_per_frame"])
+            for name, value in power.items()
+        )
+        print("  %-28s %s" % ("- GPU power", reading))
     gemm = sum(ms for ms, _, name in rows if name.startswith("gemm"))
     print(
         f"\n  GEMM {gemm:.1f} ms of {device:.1f} ({100 * gemm / device:.0f}%); everything else {device - gemm:.1f} ms ({100 * (device - gemm) / device:.0f}%)"
@@ -308,6 +319,10 @@ def main():
             "wall_ms": round(wall * 1e3, 2),
             "device_ms": round(device, 2),
             "fps": round(1.0 / wall, 2),
+            "power_w": {name: round(value["w"], 2) for name, value in power.items()},
+            "energy_j_per_frame": {
+                name: round(value["j_per_frame"], 3) for name, value in power.items()
+            },
             "head": hashlib.sha1(np.ascontiguousarray(head).tobytes()).hexdigest()[:12]
             if isinstance(head, np.ndarray)
             else None,

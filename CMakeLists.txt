@@ -629,7 +629,7 @@ nr_shader(gemm_coopmat.spv         src/gpu/gemm_coopmat.comp)
 # wider RN keeps each block's column width (see the Makefile).
 nr_shader(gemm_resident_n8.spv     src/gpu/gemm_resident.comp -DXMX_TN=8)
 nr_shader(gemm_tiled_n8.spv        src/gpu/gemm_resident.comp -DXMX_TN=8 -DRM=2 -DRN=4)
-nr_shader(gemm_staged_n8.spv       src/gpu/gemm_staged.comp -DXMX_TN=8 -DXMX_SG=8 -DSTAGED_BK=32)
+nr_shader(gemm_staged_n8.spv       src/gpu/gemm_staged.comp -DXMX_TN=8 -DXMX_SG=8 -DSTAGED_BK=32 -DSTAGED_WARPS=4)
 nr_shader(gemm_staged32_n8.spv     src/gpu/gemm_staged.comp -DXMX_TN=8 -DXMX_SG=8 -DSTAGED_BM=32)
 nr_shader(gemm_staged32_deep_n8.spv src/gpu/gemm_staged.comp -DXMX_TN=8 -DXMX_SG=8 -DSTAGED_BM=32 -DSTAGED_BK=64)
 nr_shader(gemm_staged_wide_n8.spv  src/gpu/gemm_staged.comp -DXMX_TN=8 -DXMX_SG=8 -DSTAGED_BM=64 -DSTAGED_BN=64 -DSTAGED_SUBS_M=4 -DSTAGED_WARPS=4)
@@ -1381,6 +1381,7 @@ if(NR_BUILD_TESTS)
       src/gpu/test_staged32.py
       src/gpu/test_staged_packed.py
       src/gpu/test_joint_qkv.py
+      src/gpu/test_gpu_telemetry.py
       src/tools/test_release.py
       src/ref/test_frame_cache.py src/ref/test_native_image.py src/ref/test_nr_model.py
       src/ref/test_temporal_controls.py)

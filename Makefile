@@ -2,9 +2,41 @@
 # The shaders are plain GLSL compiled to SPIR-V; libxmx keeps the Vulkan context alive
 # across calls so a block records as one command buffer.
 
-GLSL    := glslangValidator --target-env vulkan1.3 -Isrc/gpu
-# The interpreter the tests run under: `make test PYTHON=python3.12` to pick another.
-PYTHON  ?= python3
+# glslangValidator: the repo-local build `scripts/dg2-build.sh` fetches into work/deps
+# first, the distribution's on PATH otherwise. Naming the path here is what lets a bare
+# `make` compile the shaders the same way the script does.
+GLSLANG := $(firstword $(wildcard work/deps/glslang/bin/glslangValidator) $(shell command -v glslangValidator) glslangValidator)
+GLSL    := $(GLSLANG) --target-env vulkan1.3 -Isrc/gpu
+# The compiler. On this image `cc` resolves to the musl cross compiler under ~/.boot-linux,
+# which has no Vulkan loader and no 32-bit libgcc: a bare `make` then failed before it ever
+# reached a test. Only the built-in default is replaced, and only when /usr/bin/gcc is
+# installed, so `make CC=...` and the environment still win.
+ifeq ($(origin CC),default)
+ifneq ($(wildcard /usr/bin/gcc),)
+CC := /usr/bin/gcc
+# The same image reaches the linker through the compiler, which finds `ld` and `as` on
+# PATH: with the musl binutils listed first, the distro compiler's LTO plugin cannot be
+# loaded and every link fails. COMPILER_PATH only prepends a directory for the compiler's
+# own subprograms, so the distro binutils win there without rewriting PATH for the recipes.
+COMPILER_PATH := /usr/bin
+export COMPILER_PATH
+endif
+endif
+# The repo-local dependency trees scripts/dg2-build.sh fetches into work/deps. Each is used
+# only when it is present, so a host with the distribution's own headers needs none of
+# them; finding them here rather than through the caller's CPATH and PNG_* environment is
+# what makes a bare `make` build the layer and the frame command as the script does.
+DEPS    := $(CURDIR)/work/deps
+X11_INC := $(firstword $(wildcard $(DEPS)/x11/usr/include))
+PNG_INC := $(firstword $(wildcard $(DEPS)/png/usr/include/libpng16))
+PNG_LIB := $(firstword $(wildcard $(DEPS)/png/usr/lib/*/libpng16.a))
+# The interpreter the tests run under: `uv run python` resolves this tree's own project
+# environment (the editable install that puts src/ and src/gpu on sys.path) and adds its bin
+# directory to PATH for whatever a test spawns, which is what nr-panel's `#!/usr/bin/env
+# python3` shebang needs. A shell with another project's venv active would otherwise run the
+# suite, and the panel, under an interpreter with no NumPy and no src/ on the path.
+# `make test PYTHON='uv run python3.12'` still picks another.
+PYTHON  ?= uv run python
 # The CPU the host passes are built for. Upstream's floor is x86-64-v3 - every CPU since
 # Haswell and Zen 1 - whose F16C makes each `_Float16` conversion one instruction; without it
 # each is a call into libgcc, and a frame was 5-13 % slower. On Lunar Lake v3 is as fast as
@@ -97,7 +129,7 @@ FFN_SG ?= 16
 FFN_ROWS ?= 8
 # window_block_n8: 32 -> 123.6 ms frame, 16 -> 111.5, 8 -> 118.6 (notes/runs.jsonl)
 WINDOW_SG ?= 16
-CFLAGS  := -O2 -fPIC -Wall -Wextra -Wno-unused-parameter -I$(VK_INC) -DSTAGED_N8_SG=$(STAGED_SG) \
+CFLAGS  := -O2 -fPIC -Wall -Wextra -Wno-unused-parameter -I$(VK_INC) $(if $(X11_INC),-I$(X11_INC)) -DSTAGED_N8_SG=$(STAGED_SG) \
            -DFFN_N8_SG=$(FFN_SG) -DWINDOW_N8_SG=$(WINDOW_SG)
 SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/gemm_staged.spv \
            work/gemm_resident_n8.spv work/gemm_tiled_n8.spv work/gemm_staged_n8.spv \
@@ -130,7 +162,15 @@ SHADERS := work/gemm_resident.spv work/gemm_tiled.spv work/gemm_staged.spv \
 # LAYER32=1 builds it regardless, and fails loudly where it cannot.
 LAYER32 ?= auto
 ifeq ($(LAYER32),auto)
-LAYER32_TARGET := $(shell printf 'int main(void) { return 0; }' | $(CC) -m32 -x c - -o /dev/null -lvulkan && echo work/libnr_layer32$(SO))
+# A test link is the honest probe: this image has the 32-bit runtime libraries (libc.so.6,
+# libvulkan.so.1) but not the 32-bit development headers, so looking for the libraries
+# alone would build a target that cannot compile. The probe's own errors are captured into
+# LAYER32_PROBE so they never reach the log of every target that merely reads the Makefile;
+# the verdict is the presence of the file the link wrote. LAYER32=1 forces the build and
+# shows the error.
+LAYER32_PROBE := $(shell rm -f $(CURDIR)/work/.layer32-probe && mkdir -p $(CURDIR)/work && printf 'int main(void) { return 0; }' | $(CC) -m32 -x c - -o $(CURDIR)/work/.layer32-probe -lvulkan 2>&1)
+LAYER32_LINKED := $(wildcard $(CURDIR)/work/.layer32-probe)
+LAYER32_TARGET := $(if $(LAYER32_LINKED),work/libnr_layer32$(SO))
 else ifeq ($(LAYER32),1)
 LAYER32_TARGET := work/libnr_layer32$(SO)
 endif
@@ -248,16 +288,16 @@ work/nr_frame.o: src/ref/nr_frame.c src/ref/nr_frame.h src/ref/nr_image.h | work
 work/libnr_frame$(SO): work/nr_frame.o work/nr_image.o
 	$(CC) -shared $(INSTALL_NAME) -o $@ $^ $(DL_LIBS) -lm -pthread
 # nr_frame.py, the command, in C: the same flags, PNG in and out through libpng.
-# pkg-config finds libpng where it is; PNG_CFLAGS / PNG_LIBS override it.
-# pkg-config first; then the prefixes a Mac keeps it under (Homebrew, vcpkg, /usr/local);
-# then the plain -lpng a distribution's package gives.
+# The repo-local fetch comes first (it is a static archive and needs no pkg-config), then
+# pkg-config, then the prefixes a Mac keeps it under (Homebrew, vcpkg, /usr/local), then the
+# plain -lpng a distribution's package gives.
 # vcpkg's .pc files are on no default pkg-config path, so they are added to the search.
 # A prefix counts only if its png.h can be read: a dangling symlink (a Mac after an old
 # build tree was deleted) would otherwise pass $(wildcard) and fail at the #include.
 PNG_PKG_CONFIG := PKG_CONFIG_PATH="$$PKG_CONFIG_PATH:$(HOME)/Downloads/vcpkg/installed/arm64-osx/lib/pkgconfig" pkg-config
 PNG_PREFIX ?= $(firstword $(foreach d,/opt/homebrew /usr/local $(HOME)/Downloads/vcpkg/installed/arm64-osx,$(if $(shell test -r $(d)/include/png.h && echo y),$(d),)))
-PNG_CFLAGS ?= $(or $(shell $(PNG_PKG_CONFIG) --cflags libpng),$(if $(PNG_PREFIX),-I$(PNG_PREFIX)/include,))
-PNG_LIBS   ?= $(or $(shell $(PNG_PKG_CONFIG) --libs libpng),$(if $(PNG_PREFIX),-L$(PNG_PREFIX)/lib -lpng -lz -Wl$(COMMA)-rpath$(COMMA)$(PNG_PREFIX)/lib,-lpng -lz))
+PNG_CFLAGS ?= $(if $(PNG_INC),-I$(PNG_INC),$(or $(shell $(PNG_PKG_CONFIG) --cflags libpng),$(if $(PNG_PREFIX),-I$(PNG_PREFIX)/include,)))
+PNG_LIBS   ?= $(if $(PNG_LIB),$(PNG_LIB) -lz,$(or $(shell $(PNG_PKG_CONFIG) --libs libpng),$(if $(PNG_PREFIX),-L$(PNG_PREFIX)/lib -lpng -lz -Wl$(COMMA)-rpath$(COMMA)$(PNG_PREFIX)/lib,-lpng -lz)))
 COMMA := ,
 work/nr_frame: src/ref/nr_frame_main.c work/libnr_frame$(SO) src/ref/nr_frame.h src/ref/nr_image.h
 	$(CC) -O2 -Wall -Wextra -Isrc/ref $(PNG_CFLAGS) -o $@ $< work/libnr_frame$(SO) -Wl,-rpath,$(CURDIR)/work $(PNG_LIBS) $(DL_LIBS) -lm -pthread
@@ -446,6 +486,7 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	$(PYTHON) src/tools/build_check.py
 	$(PYTHON) src/tools/test_release.py
 	$(PYTHON) src/bench/frame_profile.py --tables
+	$(PYTHON) src/gpu/test_gpu_telemetry.py
 	$(PYTHON) src/gpu/test_portable.py
 	XMX_PORTABLE=1 $(PYTHON) src/gpu/test_portable.py
 	$(PYTHON) src/gpu/test_epilogue.py
