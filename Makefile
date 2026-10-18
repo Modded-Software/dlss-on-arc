@@ -548,6 +548,20 @@ prepare-weights: work/nr_frame
 
 .PHONY: all test test-metal test-ffn test-proton bench bench-coopmat publish-check prepare-weights
 
+# Per-backend GPU gate matrix (scripts/gpu-test.sh) and the interleaved HEAD/working-tree
+# frame A/B (scripts/ab-frame.sh). TIMEOUT per test; LABEL names notes/runs/ab-LABEL/.
+TIMEOUT ?= 1800
+gpu-test-opencl: ## GPU tests on OpenCL (XMX_DEVICE=1)
+	bash scripts/gpu-test.sh --backend opencl --timeout $(TIMEOUT)
+
+gpu-test-vulkan: ## GPU tests on Vulkan (XMX_DEVICE=1)
+	bash scripts/gpu-test.sh --backend vulkan --timeout $(TIMEOUT)
+
+ab-frame: ## Interleaved A/B, working tree vs HEAD: make ab-frame LABEL=x BACKEND=vulkan
+	bash scripts/ab-frame.sh --label "$(LABEL)" --backend "$(or $(BACKEND),opencl)"
+
+.PHONY: gpu-test-opencl gpu-test-vulkan ab-frame
+
 # CI variables for the scaffold-ci block below. --append-makefile added the rules but not
 # the template preamble that defines these, so they are defined here. CI_DIR is absolute
 # (/opt/workspace-ci), so the template's REPO_ROOT and relative-path branch are not
