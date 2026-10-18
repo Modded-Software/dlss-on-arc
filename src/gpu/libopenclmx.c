@@ -1133,14 +1133,17 @@ static const char *GEMM_BLK_SRC =
 "                }\n" \
 "            }\n" \
 "        }\n" \
+"        /* Lane l owns channels 4l..4l+3 of each token, so one vector store a token puts\n" \
+"         * the sub-group's 32 channels down as one contiguous row. Every merged value is\n" \
+"         * E4M3, exact in half, so vstore_half4's conversion equals the (half) cast. */\n" \
 "        for (uint i = 0u; i < 8u; i++) {\n" \
 "            uint token = 8u * sub + i;\n" \
-"            for (uint c = 0u; c < 4u; c++) {\n" \
-"                uint d = 4u * lane + c;\n" \
-"                if (merged) Out[(((size_t)window * 64u + token) * heads + head) * 32u + d]\n" \
-"                    = (half)e4m3(acc[i][c]);\n" \
-"                else Ctx[((size_t)b * 64u + token) * 32u + d] = acc[i][c];\n" \
-"            }\n" \
+"            float4 o = (float4)(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);\n" \
+"            if (merged)\n" \
+"                vstore_half4((float4)(e4m3(o.s0), e4m3(o.s1), e4m3(o.s2), e4m3(o.s3)), 0,\n" \
+"                             Out + (((size_t)window * 64u + token) * heads + head) * 32u\n" \
+"                                 + 4u * lane);\n" \
+"            else vstore4(o, 0, Ctx + ((size_t)b * 64u + token) * 32u + 4u * lane);\n" \
 "        }\n" \
 "    }\n" \
 "}\n"
