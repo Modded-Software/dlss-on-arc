@@ -13,6 +13,7 @@
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
 
 #include "publish.glsl"
 
@@ -113,6 +114,7 @@ shared ACC stage[BM * BN];
 #if XMX_BN == 32
 void qkv_barrier() { subgroupMemoryBarrierShared(); subgroupBarrier(); }
 #define QKV_STAGE ACC
+#define COSINE_TREE_SHUFFLE   // the epilogue's four-lanes-a-row normalisation
 #include "cosine_tree.glsl"
 #include "qkv_epilogue.glsl"
 #endif

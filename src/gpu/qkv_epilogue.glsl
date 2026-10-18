@@ -33,11 +33,34 @@
 void qkv_epilogue(uint row, uint col, uint lane, uint lanes) {
     uint channels = pc.n / 3u, tokens = pc.image_h, heads = pc.image_w;
     uint part = col / channels, head = (col % channels) / 32u;
-    /* Q and K: one invocation per row, as the row pass does - the reciprocal norm through
-     * the fragment tree, then the row scaled by it (and Q by its head's scale). */
+    /* Q and K: the reciprocal norm through the fragment tree, then the row scaled by it
+     * (and Q by its head's scale) - four lanes a row where the includer can shuffle
+     * (COSINE_TREE_SHUFFLE), otherwise one invocation a row, as the row pass does. */
     if (part < 2u) {
         bool vit = (operation_flags() & 0x2000u) != 0u;
         float scale = part == 0u ? half_round(FloatBuf(pc.qkv_scale).v[head]) : 1.0;
+#ifdef COSINE_TREE_SHUFFLE
+        /* Four lanes a row (cosine_tree.glsl's cosine_reciprocal_lanes), eight channels a
+         * lane. One lane a row left three quarters of the workgroup idle on a chain of a
+         * hundred dependent half operations: half the 128 lanes had no row at all with
+         * BM 64. Every lane runs every pass of the loop, a row or not, because the tree's
+         * shuffles need the whole subgroup; `lanes` is a multiple of four, so a quad is
+         * all in or all out. Each lane reads and writes only its own eight elements. */
+        for (uint base = 0u; base < BM * 4u; base += lanes) {
+            uint v = base + lane, r = min(v / 4u, BM - 1u), l = v % 4u;
+            bool live = v / 4u < BM;
+            float h[8];
+            for (uint i = 0u; i < 8u; i++)
+                h[i] = half_round(float(stage[r * BN + (i >> 1) * 8u + 2u * l + (i & 1u)]));
+            float reciprocal = cosine_reciprocal_lanes(h, vit);
+            if (live)
+                for (uint i = 0u; i < 8u; i++) {
+                    float value = hmul(h[i], reciprocal);
+                    if (part == 0u) value = hmul(vit ? hmul(value, VIT_ROOT) : value, scale);
+                    stage[r * BN + (i >> 1) * 8u + 2u * l + (i & 1u)] = QKV_STAGE(value);
+                }
+        }
+#else
         for (uint r = lane; r < BM; r += lanes) {
             float h[32];
             for (uint i = 0u; i < 32u; i++) h[i] = half_round(float(stage[r * BN + i]));
@@ -48,6 +71,7 @@ void qkv_epilogue(uint row, uint col, uint lane, uint lanes) {
                 stage[r * BN + i] = QKV_STAGE(value);   // a half value: exact in either type
             }
         }
+#endif
         qkv_barrier();
     }
     uint64_t target = part == 0u ? uint64_t(pc.c)

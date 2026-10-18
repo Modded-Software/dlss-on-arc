@@ -85,6 +85,7 @@ layout(push_constant, scalar) uniform Push {
 } pc;
 
 #include "specialize.glsl"
+#define COSINE_TREE_SHUFFLE
 #include "cosine_tree.glsl"
 
 layout(scalar) shared AsHalf  { float16_t h16[8192]; };
@@ -197,19 +198,7 @@ void main() {
         }
         if (part < 2u) {
             for (uint i = 0u; i < 8u; i++) h[i] = half_round(h[i]);
-            float partial[2];
-            for (uint parity = 0u; parity < 2u; parity++) {
-                float first  = hfma(h[2u + parity], h[2u + parity], hmul(h[parity], h[parity]));
-                float second = hfma(h[6u + parity], h[6u + parity], hmul(h[4u + parity], h[4u + parity]));
-                partial[parity] = hadd(first, second);
-            }
-            float pairs[2], whole[2];
-            for (uint parity = 0u; parity < 2u; parity++)
-                pairs[parity] = hadd(partial[parity], subgroupShuffleXor(partial[parity], 2u));
-            for (uint parity = 0u; parity < 2u; parity++)
-                whole[parity] = hadd(pairs[parity], subgroupShuffleXor(pairs[parity], 1u));
-            float norm = max(hadd(whole[0], whole[1]), half_round(COSINE_NORM_FLOOR));
-            float reciprocal = half_round(inversesqrt(norm));
+            float reciprocal = cosine_reciprocal_lanes(h, false);
             float scale = part == 0u ? half_round(FloatBuf(pc.qkv_scale).v[0]) : 1.0;
             for (uint i = 0u; i < 8u; i++) {
                 float value = hmul(h[i], reciprocal);

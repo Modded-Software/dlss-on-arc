@@ -24,6 +24,7 @@
 #extension GL_KHR_memory_scope_semantics : require
 #extension GL_KHR_cooperative_matrix : require
 #extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
 #extension GL_EXT_shared_memory_block : require
 
 #include "publish.glsl"
@@ -156,6 +157,7 @@ layout(scalar) shared Staging {
 
 void qkv_barrier() { barrier(); }
 #define QKV_STAGE float
+#define COSINE_TREE_SHUFFLE   // the epilogue's four-lanes-a-row normalisation
 #include "cosine_tree.glsl"
 #include "qkv_epilogue.glsl"
 
