@@ -73,6 +73,10 @@ if [ ${#TESTS[@]} -eq 0 ]; then
     TESTS+=("$t")
   done
 fi
+for t in "${TESTS[@]}"; do
+  # a mistyped name is a usage error, not a failing test
+  [ -f "src/gpu/$t.py" ] || { say "NO SUCH TEST $t (src/gpu/$t.py)"; exit 2; }
+done
 PASS=0
 FAIL=0
 for t in "${TESTS[@]}"; do

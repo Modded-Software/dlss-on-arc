@@ -281,6 +281,59 @@ void main() {
                 for (uint e = 0; e < 4u; e++) buf_b[BI(kk, c + e)] = rb[2u * p][e];
                 for (uint e = 0; e < 4u; e++) buf_b[BI(kk, c + 4u + e)] = rb[2u * p + 1u][e];
             }
+        } else if (window_a && wide_b && !transposed) {
+            /* The window gather, every load of the step issued before any is stored - the
+             * fix above for the straight loaders, which this path never had. In the general
+             * loader below each gathered row's load sits in its own inside-the-image branch,
+             * so a thread waited out one memory latency per row; the QKV projections that
+             * gather have K = 32, a single step, so nothing hid it. A token outside the image
+             * reads the image's first element instead and is masked to +0, which is what
+             * the general loader stores there (e4m3 of +0 is +0). Same addresses, same
+             * values: bit-identical. */
+            const uint STEP = (32u * WARPS) / 4u;
+            const uint A_PER = BM / STEP, B_PER = B_ITEMS / STEP;
+            vec4 ra[A_PER * KC * 2u];
+            f16vec4 rb[B_PER * 2u];
+            bool inside[A_PER];
+            Float4Buf image = Float4Buf(uint64_t(pc.a));
+            for (uint p = 0u; p < A_PER; p++) {
+                uint token_row = row + lr + p * STEP, window = token_row / 64u, token = token_row % 64u;
+                int y = int((window / pc.sc) * 8u + token / 8u) - int(pc.window_pad >> 16);
+                int x = int((window % pc.sc) * 8u + token % 8u) - int(pc.window_pad & 0xffffu);
+                inside[p] = y >= 0 && x >= 0 && y < int(pc.sb) && x < int(pc.sa);
+                uint pixel = inside[p] ? (uint(y) * pc.sa + uint(x)) * pc.k : 0u;
+                for (uint q = 0u; q < KC; q++) {
+                    uint at = inside[p] ? pixel + k0 + q * 32u + lc : 0u, i = p * KC + q;
+                    if (image_half) {
+                        ra[2u * i] = vec4(a4.v4[at >> 2]);
+                        ra[2u * i + 1u] = vec4(a4.v4[(at >> 2) + 1u]);
+                    } else {
+                        ra[2u * i] = image.v4[at >> 2];
+                        ra[2u * i + 1u] = image.v4[(at >> 2) + 1u];
+                    }
+                }
+            }
+            for (uint p = 0u; p < B_PER; p++) {
+                uint item = lr + p * STEP, kk = item % BK, q = item / BK;
+                uint at = bo + (k0 + kk) * ldb + col + q * 32u + lc;
+                rb[2u * p] = b4.v4[at >> 2];
+                rb[2u * p + 1u] = b4.v4[(at >> 2) + 1u];
+            }
+            for (uint p = 0u; p < A_PER; p++)
+                for (uint q = 0u; q < KC; q++) {
+                    uint r = lr + p * STEP, c = q * 32u + lc, i = p * KC + q;
+                    vec4 lo = inside[p] ? ra[2u * i] : vec4(0.0);
+                    vec4 hi = inside[p] ? ra[2u * i + 1u] : vec4(0.0);
+                    if (image_publish)
+                        for (uint e = 0; e < 4u; e++) { lo[e] = e4m3(lo[e]); hi[e] = e4m3(hi[e]); }
+                    for (uint e = 0; e < 4u; e++) buf_a[r * SA + c + e] = float16_t(lo[e]);
+                    for (uint e = 0; e < 4u; e++) buf_a[r * SA + c + 4u + e] = float16_t(hi[e]);
+                }
+            for (uint p = 0u; p < B_PER; p++) {
+                uint item = lr + p * STEP, kk = item % BK, c = (item / BK) * 32u + lc;
+                for (uint e = 0; e < 4u; e++) buf_b[BI(kk, c + e)] = rb[2u * p][e];
+                for (uint e = 0; e < 4u; e++) buf_b[BI(kk, c + 4u + e)] = rb[2u * p + 1u][e];
+            }
         } else {
             for (uint q = 0u; q < KC; q++)
             for (uint r = lr; r < BM; r += (32u * WARPS) / 4u) {
