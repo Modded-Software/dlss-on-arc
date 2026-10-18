@@ -79,16 +79,26 @@ void qkv_epilogue(uint row, uint col, uint lane, uint lanes) {
     bool wide = (uint(target) & 7u) == 0u;
     /* Then every invocation publishes four consecutive elements of one row, so the stores
      * coalesce: a row is one head's 32 channels, contiguous in the target. */
-    for (uint e = lane * 4u; e < BM * BN; e += lanes * 4u) {
-        uint r = row + e / BN, window = r / tokens, token = r % tokens;
-        if (r >= pc.m) continue;                 // a partial last block's rows past M
-        uint at = ((window * heads + head) * tokens + token) * 32u + e % BN;
-        vec4 out4;
-        for (uint i = 0u; i < 4u; i++) out4[i] = e4m3(float(stage[e + i]));
-        if (wide) {
-            Half4Buf(target).v4[at >> 2] = f16vec4(out4);
-        } else {
-            for (uint i = 0u; i < 4u; i++) HalfBuf(target).v[at + i] = float16_t(out4[i]);
+    /* Every includer's `lanes * 4` is a whole number of BN-wide rows (128 or 32 lanes, BN
+     * 32), so a lane keeps its column through the loop and its row moves by a fixed step.
+     * The (window, token) split is then one division up front and an add with a carry per
+     * pass, where a division and a remainder by the runtime `tokens` every pass are a long
+     * emulated sequence each on this hardware. The same addresses either way. */
+    uint first = lane * 4u, step = lanes * 4u / BN, column = first % BN;
+    uint start = row + first / BN, window = start / tokens, token = start % tokens;
+    for (uint e = first; e < BM * BN; e += lanes * 4u) {
+        uint r = row + e / BN;
+        if (r < pc.m) {                          // a partial last block's rows past M are not stored
+            uint at = ((window * heads + head) * tokens + token) * 32u + column;
+            vec4 out4;
+            for (uint i = 0u; i < 4u; i++) out4[i] = e4m3(float(stage[e + i]));
+            if (wide) {
+                Half4Buf(target).v4[at >> 2] = f16vec4(out4);
+            } else {
+                for (uint i = 0u; i < 4u; i++) HalfBuf(target).v[at + i] = float16_t(out4[i]);
+            }
         }
+        token += step;
+        while (token >= tokens) { token -= tokens; window++; }
     }
 }
