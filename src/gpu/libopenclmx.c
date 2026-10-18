@@ -853,22 +853,40 @@ static const char *GEMM_BLK_SRC =
 "    barrier(CLK_LOCAL_MEM_FENCE);\n" \
 "    unsigned chunk = col0 >> 5u;\n" \
 "    unsigned part = chunk / heads, head = chunk % heads;\n" \
-"    for (unsigned lr = lid; lr < 8 * RM; lr += QKV_THREADS) {\n" \
-"        unsigned m = row0 + lr;\n" \
-"        unsigned at = (((m / tokens) * heads + head) * tokens + (m % tokens)) * 32u;\n" \
+"    /* A SIMD8 sub-group takes eight rows at a time. Each lane reduces its own row's\n" \
+"     * reciprocal, then the lanes store across one row: a 64-byte row a store instead of\n" \
+"     * 32 two-byte stores a row with the lanes eight rows apart. Values are unchanged. */\n" \
+"    unsigned d = 4u * lane;\n" \
+"    float scale = part == 0u ? HROUND(Scale[head]) : 1.0f;\n" \
+"    __global half *dst = part == 0u ? Q : Kt;\n" \
+"    for (unsigned first = sg * 8u; first < 8u * RM; first += QKV_THREADS) {\n" \
 "        if (part == 2u) {\n" \
-"            for (unsigned d = 0; d < 32u; d++) V[at + d] = (half)e4m3(stg[lr][d]);\n" \
+"            for (unsigned i = 0; i < 8u; i++) {\n" \
+"                unsigned r = first + i, m = row0 + r;\n" \
+"                unsigned at = (((m / tokens) * heads + head) * tokens + (m % tokens)) * 32u;\n" \
+"                float4 rv = (float4)(e4m3(stg[r][d]), e4m3(stg[r][d + 1u]),\n" \
+"                                     e4m3(stg[r][d + 2u]), e4m3(stg[r][d + 3u]));\n" \
+"                vstore_half4(rv, 0, V + at + d);\n" \
+"            }\n" \
 "            continue;\n" \
 "        }\n" \
-"        float reciprocal = vit ? vit_reciprocal_local(stg[lr])\n" \
-"                              : cosine_reciprocal_local(stg[lr]);\n" \
-"        float scale = part == 0u ? HROUND(Scale[head]) : 1.0f;\n" \
-"        __global half *dst = part == 0u ? Q : Kt;\n" \
-"        for (unsigned d = 0; d < 32u; d++) {\n" \
-"            float value = hmul(HROUND(stg[lr][d]), reciprocal);\n" \
-"            if (part == 0u) value = hmul(vit ? hmul(value, VIT_ROOT) : value, scale);\n" \
-"            value = e4m3(value);\n" \
-"            dst[at + d] = (half)value;\n" \
+"        float own = vit ? vit_reciprocal_local(stg[first + lane])\n" \
+"                        : cosine_reciprocal_local(stg[first + lane]);\n" \
+"        for (unsigned i = 0; i < 8u; i++) {\n" \
+"            unsigned r = first + i, m = row0 + r;\n" \
+"            unsigned at = (((m / tokens) * heads + head) * tokens + (m % tokens)) * 32u;\n" \
+"            float reciprocal = sub_group_broadcast(own, i);\n" \
+"            float s0 = hmul(HROUND(stg[r][d]), reciprocal);\n" \
+"            float s1 = hmul(HROUND(stg[r][d + 1u]), reciprocal);\n" \
+"            float s2 = hmul(HROUND(stg[r][d + 2u]), reciprocal);\n" \
+"            float s3 = hmul(HROUND(stg[r][d + 3u]), reciprocal);\n" \
+"            if (part == 0u) {\n" \
+"                s0 = hmul(vit ? hmul(s0, VIT_ROOT) : s0, scale);\n" \
+"                s1 = hmul(vit ? hmul(s1, VIT_ROOT) : s1, scale);\n" \
+"                s2 = hmul(vit ? hmul(s2, VIT_ROOT) : s2, scale);\n" \
+"                s3 = hmul(vit ? hmul(s3, VIT_ROOT) : s3, scale);\n" \
+"            }\n" \
+"            vstore_half4((float4)(e4m3(s0), e4m3(s1), e4m3(s2), e4m3(s3)), 0, dst + at + d);\n" \
 "        }\n" \
 "    }\n" \
 "}\n"
@@ -968,27 +986,36 @@ static const char *GEMM_BLK_SRC =
 "            for (unsigned c = 0; c < RN; c++)\n" \
 "                stg[pair][r * 8 + i][sub * (8 * RN) + c * 8 + lane] = acc[r][c][i];\n" \
 "    barrier(CLK_LOCAL_MEM_FENCE);\n" \
+"    /* rows is a multiple of 8, so a SIMD8 sub-group is eight rows of one part. Each lane\n" \
+"     * reduces its own row's reciprocal, then the sub-group stores the eight rows one at a\n" \
+"     * time with the lanes across the row: one 64-byte row a store, not eight 8-byte pieces\n" \
+"     * of eight rows. Every value is computed as before, so the output is identical. */\n" \
 "    unsigned ep = lid / rows, lr = lid % rows;\n" \
 "    unsigned chunk = ep;\n" \
 "    unsigned part = chunk / heads, head = chunk % heads;\n" \
-"    unsigned m = row0 + lr;\n" \
-"    unsigned at = (((m / tokens) * heads + head) * tokens + (m % tokens)) * 32u;\n" \
+"    unsigned first = lr - lane;\n" \
+"    unsigned d = 4u * lane;\n" \
 "    if (part == 2u) {\n" \
-"        for (unsigned d = 0; d < 32u; d += 4u) {\n" \
-"            float4 rv = (float4)(e4m3(stg[ep][lr][d]), e4m3(stg[ep][lr][d + 1u]),\n" \
-"                                 e4m3(stg[ep][lr][d + 2u]), e4m3(stg[ep][lr][d + 3u]));\n" \
+"        for (unsigned i = 0; i < 8u; i++) {\n" \
+"            unsigned r = first + i, m = row0 + r;\n" \
+"            unsigned at = (((m / tokens) * heads + head) * tokens + (m % tokens)) * 32u;\n" \
+"            float4 rv = (float4)(e4m3(stg[ep][r][d]), e4m3(stg[ep][r][d + 1u]),\n" \
+"                                 e4m3(stg[ep][r][d + 2u]), e4m3(stg[ep][r][d + 3u]));\n" \
 "            vstore_half4(rv, 0, V + at + d);\n" \
 "        }\n" \
 "    } else {\n" \
-"        float reciprocal = vit ? vit_reciprocal_local(stg[ep][lr])\n" \
-"                              : cosine_reciprocal_local(stg[ep][lr]);\n" \
+"        float own = vit ? vit_reciprocal_local(stg[ep][lr])\n" \
+"                        : cosine_reciprocal_local(stg[ep][lr]);\n" \
 "        float scale = part == 0u ? HROUND(Scale[head]) : 1.0f;\n" \
 "        __global half *odd = part == 0u ? Q : Kt;\n" \
-"        for (unsigned d = 0; d < 32u; d += 4u) {\n" \
-"            float s0 = hmul(HROUND(stg[ep][lr][d]), reciprocal);\n" \
-"            float s1 = hmul(HROUND(stg[ep][lr][d + 1u]), reciprocal);\n" \
-"            float s2 = hmul(HROUND(stg[ep][lr][d + 2u]), reciprocal);\n" \
-"            float s3 = hmul(HROUND(stg[ep][lr][d + 3u]), reciprocal);\n" \
+"        for (unsigned i = 0; i < 8u; i++) {\n" \
+"            unsigned r = first + i, m = row0 + r;\n" \
+"            unsigned at = (((m / tokens) * heads + head) * tokens + (m % tokens)) * 32u;\n" \
+"            float reciprocal = sub_group_broadcast(own, i);\n" \
+"            float s0 = hmul(HROUND(stg[ep][r][d]), reciprocal);\n" \
+"            float s1 = hmul(HROUND(stg[ep][r][d + 1u]), reciprocal);\n" \
+"            float s2 = hmul(HROUND(stg[ep][r][d + 2u]), reciprocal);\n" \
+"            float s3 = hmul(HROUND(stg[ep][r][d + 3u]), reciprocal);\n" \
 "            if (part == 0u) {\n" \
 "                s0 = hmul(vit ? hmul(s0, VIT_ROOT) : s0, scale);\n" \
 "                s1 = hmul(vit ? hmul(s1, VIT_ROOT) : s1, scale);\n" \
