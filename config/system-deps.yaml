@@ -1,0 +1,65 @@
+# System dependencies for the Linux/Arc build, in the WORKSPACE-CI unified schema.
+# Checked and installed by: make init (via CI's scripts/install-system-deps --config config/system-deps.yaml).
+#
+# Host packages only. A downloaded file - the .deb header trees staged into
+# work/deps, and the Vulkan-Headers and MLX-DLSS checkouts - is pinned in
+# res/native-pins.json and staged by scripts/fetch_deps.py; language
+# dependencies live in pyproject.toml and uv.lock.
+#
+# install-system-deps skips any tool already present on the system.
+
+requires:
+  - check_cmd: make
+    apt_package: make
+    brew_package: make
+    description: GNU Make
+
+  - check_type: c-compiler
+    description: C compiler (gcc/cc/clang)
+
+  - check_cmd: cmake
+    apt_package: cmake
+    brew_package: cmake
+    description: cmake (the CMake build of the same targets)
+
+  - check_cmd: git
+    apt_package: git
+    brew_package: git
+    description: Git (the pinned Vulkan-Headers and MLX-DLSS checkouts)
+
+  - check_cmd: curl
+    apt_package: curl
+    description: curl
+
+  - check_cmd: tar
+    apt_package: tar
+    description: tar archiver
+
+  - check_cmd: unzip
+    apt_package: unzip
+    description: unzip archive extractor
+
+  - check_cmd: dpkg-deb
+    apt_package: dpkg
+    description: dpkg-deb extractor (extracts the pinned header trees)
+    platforms: [linux]
+
+  - check_cmd: glslangValidator
+    apt_package: glslang-tools
+    brew_package: glslang
+    description: SPIR-V shader compiler for the Arc path
+
+  - check_type: apt-package
+    apt_package: libpng-dev
+    description: libpng headers and static library (the nr_frame command)
+    platforms: [linux]
+
+  - check_type: apt-package
+    apt_package: libx11-dev
+    description: X11 headers (the layer's Xlib path)
+    platforms: [linux]
+
+  - check_type: apt-package
+    apt_package: libvulkan-dev
+    description: Vulkan loader and headers (libxmx and the layer)
+    platforms: [linux]
