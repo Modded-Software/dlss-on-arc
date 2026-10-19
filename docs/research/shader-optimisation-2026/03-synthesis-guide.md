@@ -117,6 +117,13 @@ Ranking = (expected ceiling on this frame) x (confidence) / (effort x risk).
 - `w5-S2/S3`: int8 DPAS is 2x FP16; emulating E4M3xFP16 exactly on int8->int32 DPAS is the
   highest-ceiling numeric idea, but the slice-count and reduction cost (`w5-S4`) must be measured
   first. Risk: high.
+- **Closed on DG2 (Run 93) - do not act.** The int8-stands-in-for-E4M3 half is settled and loses:
+  an int8 staged GEMM (configuration 4, tile `8x8x32` at this part's own N=8) was built, is
+  bit-exact against exact integer arithmetic on six shapes, and measured **0.66-0.98x** of f16 on
+  the eight ViT-bottleneck shapes (1392.7 us f16 against 1807.8 us int8). Both DG2 tiles are N=8,
+  so only K per instruction doubles while the operand-fragment traffic that the kernel is bound on
+  (`W1` tile row; `phase77`) is unchanged. "int8 DPAS is 2x FP16" is an Xe2/NVIDIA density figure
+  and does not transfer. Only the DGC half of D9 remains a monitor item.
 
 ## Sequencing recommendation
 

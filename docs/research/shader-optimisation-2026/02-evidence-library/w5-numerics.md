@@ -34,7 +34,9 @@ Counts: found ~18 / screened 12 / included 6 / excluded 6 (FP8-hardware-only, or
   - Measured FP64 emulation: 7.4-9.8 TFLOPS on RTX 4090, 56.6-80.2 TFLOPS on GH200.
 - Transferability to DG2/A770: partial. The *idea* - represent a wide-dynamic-range float product
   as sums of exact int8 products accumulated in int32 - maps to DG2's `{8,8,32 int8->int32}` DPAS,
-  which IS advertised and runs at 2x the FP16 rate. For our case the target is not FP64 but
+  which IS advertised. The "2x the FP16 rate" is an arithmetic-density figure (NVIDIA there, Xe2
+  in W1): measured on this A770's staged GEMM it is **0.66-0.98x** of f16 (Run 93), because both
+  DG2 tiles are N=8 and the kernel is shared-memory-message bound. For our case the target is not FP64 but
   "E4M3 x FP16" (or FP16 with higher fidelity): E4M3 has a 3-bit mantissa and 4-bit exponent, so
   splitting E4M3 into an int8 slice is more plausible than FP64 emulation. Numbers are NVIDIA.
 - Exact vs approximate: **exact** for the represented inputs (the whole point). If we use fewer
@@ -48,8 +50,10 @@ Counts: found ~18 / screened 12 / included 6 / excluded 6 (FP8-hardware-only, or
     consumption and the number of operations while keeping the same accuracy as the FMMU."
   - "The theoretical peak throughput of IMMUs is typically higher than that of FMMUs."
   - Outperforms cuBLAS DGEMM and the FP16-TC Ozaki implementation by up to ~6x on consumer GPUs.
-- Transferability: same as S2. Confirms int8-INT32 DPAS is the right primitive for emulation and
-  that memory traffic also drops (relevant to our bandwidth-bound frame).
+- Transferability: same as S2. Confirms int8-INT32 DPAS is the right primitive for emulation. The
+  memory-traffic claim does not transfer: no site in this frame is bandwidth-bound (37-250 GB/s
+  against ~450), and the int8 operands are half the bytes but the kernel is bound on
+  shared-memory messages, not DRAM (Run 93).
 
 ### S4. Performance Enhancement of the Ozaki Scheme on IMMU
 - arXiv: 2409.13313. Retrieved: yes.

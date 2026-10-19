@@ -117,8 +117,16 @@ Counts: found ~20 / screened 12 / included 7 (below) / excluded 5 (PVC-only or n
 | f16 accumulate | not in DG2 advertised set | f16-acc DPAS must go via OpenCL/IGC or a compiler path |
 | FP8/E4M3 | absent | FP8 must be emulated (see W5) |
 | Tile | 8x8x16 (f16), 8x8x32 (int8) | skinny N is quantised hard by 8/16 |
+| int8 throughput | int8 advertised at 2x f16 (W5 S2/S3, NVIDIA/Xe2) | on DG2 both tiles are N=8, so only K doubles and the shared-memory-message-bound kernel gains nothing: the frame's own shapes measured **0.66-0.98x** of f16 (Run 93) |
 
 No source contradicts another; the oneDNN/XMX peak numbers are PVC/Xe2, not DG2 (flagged).
+
+The one number that was quoted across W1/W5 without a DG2 measurement - int8 at 2x f16 - is now
+measured on this A770 and does not hold: an int8 staged GEMM, tile `8x8x32`, bit-exact against
+exact integer arithmetic, runs its eight ViT-bottleneck shapes in 1807.8 us against f16's
+1392.7 us (device medians 1685.6 against 1262.7). The same N=8 tile on both means the fragment
+load traffic - what the kernel is actually bound on - is unchanged, so the extra K per instruction
+is spent nowhere. Do not re-open int8 on this part without a change to that traffic.
 
 ## Practical implications for this frame
 
