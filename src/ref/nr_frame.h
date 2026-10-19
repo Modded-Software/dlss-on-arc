@@ -307,7 +307,7 @@ double nr_frame_split(const nr_frame *frame, int which);
  * vendor's history for the next frame. So a host drives the whole live pass through C with
  * no daemon and no socket, on whichever runtime is behind the library, and a `--dump`
  * capture replayed through it in its order gets the history the daemon gave it
- * (`nr_frame --replay`, `src/bench/restill.py --native`). The interface mask is not taken.
+ * (`nr_frame --replay`, `src/bench/quality/restill.py --native`). The interface mask is not taken.
  *
  *     nr_frame_live *live = nr_frame_live_open(frame);
  *     nr_frame_live_settings s; nr_frame_live_defaults(&s);

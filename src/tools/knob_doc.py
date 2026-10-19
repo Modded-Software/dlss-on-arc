@@ -14,12 +14,11 @@ here for a worse reason: the hand-written one survived the host passes moving to
 understating this machine by a third, and at 1080p by half, for a week.
 """
 
-import pathlib
 import sys
 
 import nr_knobs
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+from nr_root import ROOT
 
 README = ROOT / "docs" / "SETTINGS.md"
 
@@ -48,7 +47,7 @@ def knobs():
 def rates():
     lines = [
         f"Measured through the socket on {nr_knobs.RATES_MEASURED} by "
-        "`uv run python src/bench/live_rates.py` - the whole round trip a game waits for, "
+        "`uv run python src/bench/frame/live_rates.py` - the whole round trip a game waits for, "
         "median of nine frames, not graph time alone:",
         "",
         "| swapchain | render scale | ms | fps |",

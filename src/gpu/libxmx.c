@@ -489,7 +489,7 @@ struct float_mode { uint32_t mode, cap, opposite; };
 
 /* `words` with each mode in `modes` declared on every entry point for each width in `widths`,
  * or NULL when there is nothing to add. A mode the module already settles for one of those
- * widths -- either way round -- is left to it (src/bench/denorm_mode.py's copies do that), and
+ * widths -- either way round -- is left to it (src/bench/numerics/denorm_mode.py's copies do that), and
  * SPIR-V before 1.4 would need SPV_KHR_float_controls, which this does not add. The caller
  * frees the result.
  *
@@ -1029,7 +1029,7 @@ static void detect_driver_modes(VkPhysicalDevice pd, uint32_t api_version)
 		 * conversion instructions, while packHalf2x16 is a GLSL.std.450 instruction
 		 * whose rounding is the implementation's. The cast is a conversion, so
 		 * `RoundingModeRTE 16` above does reach it. Measured with
-		 * src/bench/half_probe.py on a Radeon iGPU: undeclared, both spellings miss
+		 * src/bench/numerics/half_probe.py on a Radeon iGPU: undeclared, both spellings miss
 		 * numpy on 183147 of 360704 values; with the mode declared the cast matches
 		 * exactly and the round trip still misses the same 183147. Taking the round
 		 * trip there biases every rounding point in the graph low. */
@@ -1122,7 +1122,7 @@ static void detect_driver_modes(VkPhysicalDevice pd, uint32_t api_version)
 		 * undeclared this is the driver's own: Mesa and Intel's Windows driver round
 		 * float16 to nearest even, and AMD's proprietary driver truncates towards zero,
 		 * so every rounding point in the graph comes out biased low there
-		 * (src/bench/half_probe.py: both hardware spellings of half_round miss numpy's
+		 * (src/bench/numerics/half_probe.py: both hardware spellings of half_round miss numpy's
 		 * float16 on half the values, the hand-written one does not). The graph is
 		 * written for round-to-nearest-even, which is what numpy and the vendor do. */
 		const int ind = (int)controls.roundingModeIndependence;

@@ -4,7 +4,7 @@ opendlss_model - the DLL's weight container as an OpenDLSS-NR model directory.
 
 `maanHimself/OpenDLSS-NR` implements the same network bit-exact against captures of the
 original on an NVIDIA GPU, and its WebGPU port runs here, on the Arc 140V, through Chromium
-(`src/bench/opendlss_reference.py`). That makes it the one reference this project can run
+(`src/bench/opendlss/opendlss_reference.py`). That makes it the one reference this project can run
 that claims the vendor's own arithmetic. Its model directory is the container this tree
 already reads (`hnet_weights.py`): the same 153 records, each a whole layer's packed payload
 under the same `blockN.layerM.parameter` name, sliced out of a few stage files and listed in
@@ -28,6 +28,8 @@ import re
 import sys
 
 import hnet_weights
+
+import nr_root
 
 STAGE_LIMIT = 16 << 20
 ALIGN = 16
@@ -97,7 +99,7 @@ def write(container, destination):
 
 
 def main():
-    root = pathlib.Path(__file__).resolve().parents[2]
+    root = nr_root.ROOT
     container = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else root / "work" / "weights_ht.bin"
     destination = (
         pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else root / "work" / "opendlss-model"

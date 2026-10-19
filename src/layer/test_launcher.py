@@ -10,7 +10,7 @@ import tempfile
 
 import prepare_layer
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+from nr_root import ROOT
 
 
 def windows_manifest_checks(base):

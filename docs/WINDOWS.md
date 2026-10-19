@@ -131,9 +131,9 @@ unfused reference differed here.
 2. **CTest**: every GPU test compares against a reference - bit for bit where the path is meant
    to be exact. A failure here is a driver difference to understand before anything is timed.
 3. **Photo mode** on a frame both systems have: `python src/ref/nr_frame.py IN.png OUT.png
-   --resident`. The picture should be the Linux one; `src/bench/frame_replay.py` prints the
+   --resident`. The picture should be the Linux one; `src/bench/frame/frame_replay.py` prints the
    head's hash and the warm graph time, the same numbers on both.
-4. **Timing** with `src/bench/frame_replay.py --size 320 320` and `--size 720 1280`: the live
+4. **Timing** with `src/bench/frame/frame_replay.py --size 320 320` and `--size 720 1280`: the live
    extent and a 720p frame (on its 1344x768 field), against the same commands on Linux. `live_rates.py` speaks `AF_UNIX`,
    which Python has not here; the daemon itself listens on a named pipe.
 

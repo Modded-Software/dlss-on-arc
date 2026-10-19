@@ -75,7 +75,7 @@ The average change between two frames above which the scene is taken to have cut
 
 <!-- rates:begin -->
 
-Measured through the socket on 2026-09-27 by `uv run python src/bench/live_rates.py` - the whole round trip a game waits for, median of nine frames, not graph time alone:
+Measured through the socket on 2026-09-27 by `uv run python src/bench/frame/live_rates.py` - the whole round trip a game waits for, median of nine frames, not graph time alone:
 
 | swapchain | render scale | ms | fps |
 | --- | ---: | ---: | ---: |

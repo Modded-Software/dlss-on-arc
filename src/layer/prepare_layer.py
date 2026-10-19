@@ -7,8 +7,9 @@ import pathlib
 import sys
 
 import nr_build
+import nr_root
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+ROOT = nr_root.ROOT
 
 SUFFIX = nr_build.SUFFIX
 _CHECKOUT = ROOT

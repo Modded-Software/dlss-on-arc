@@ -24,7 +24,9 @@ import os
 import pathlib
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+import nr_root
+
+ROOT = nr_root.ROOT
 # the platform's shared-library suffix, as both builds name them (`.dylib` on macOS, `.dll`
 # on Windows, `.so` elsewhere); every library carries the `lib` prefix, Windows included
 SUFFIX = {"darwin": ".dylib", "win32": ".dll"}.get(sys.platform, ".so")

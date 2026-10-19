@@ -18,7 +18,7 @@ import time
 import nr_model as M
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+from nr_root import ROOT
 
 
 def _weights_path():

@@ -20,6 +20,8 @@ from unittest.mock import patch
 import pytest
 from wizard import config, deps, manage, process, state, status
 
+import nr_root
+
 
 def write_pe(path, x64=True, suffix=b""):
     path = Path(path)
@@ -628,9 +630,7 @@ class WizardFixture(unittest.TestCase):
             4096,
         )
         assert (names["release"]["high"], names["release"]["runtime_high"]) == (64, 255)
-        daemon_source = (Path(__file__).resolve().parents[1] / "layer/nr_daemon.py").read_text(
-            encoding="utf-8"
-        )
+        daemon_source = (nr_root.SOURCE / "layer/nr_daemon.py").read_text(encoding="utf-8")
         tree = ast.parse(daemon_source)
         actual = {}
         for node in ast.walk(tree):
@@ -772,9 +772,7 @@ class WizardFixture(unittest.TestCase):
         self,
     ):
         # Execute just the real daemon's Settings class, avoiding its GPU imports.
-        daemon_source = (Path(__file__).resolve().parents[1] / "layer/nr_daemon.py").read_text(
-            encoding="utf-8"
-        )
+        daemon_source = (nr_root.SOURCE / "layer/nr_daemon.py").read_text(encoding="utf-8")
         tree = ast.parse(daemon_source)
         actual_class = next(
             node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "Settings"

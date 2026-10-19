@@ -13,10 +13,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parents[2]
 import build_release as release
 import fetch_dxvk as fetch
 import pytest
+
+from nr_root import ROOT
 
 
 class ReleaseTests(unittest.TestCase):

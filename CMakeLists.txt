@@ -663,7 +663,7 @@ nr_shader(window_block_n8.spv             src/gpu/window_block.comp -DXMX_TN=8 -
 nr_shader(global_attention_n8.spv         src/gpu/global_attention.comp -DXMX_TN=8)
 nr_shader(gemm_staged_int8.spv            src/gpu/gemm_staged_int8.comp)
 nr_shader(gemm_staged_int8_portable.spv   src/gpu/gemm_staged_int8_portable.comp)
-nr_shader(half_probe.spv           src/bench/half_probe.comp)
+nr_shader(half_probe.spv           src/bench/numerics/half_probe.comp)
 add_custom_target(shaders ALL DEPENDS ${NR_SPV})
 
 set(NR_SHADER_OBJECTS)
@@ -1223,7 +1223,7 @@ else()
 endif()
 
 # live_rates.py for the C library: the daemon's frame, end to end, in one process.
-add_executable(nr_frame_rates src/bench/nr_frame_rates.c)
+add_executable(nr_frame_rates src/bench/frame/nr_frame_rates.c)
 target_include_directories(nr_frame_rates PRIVATE src/ref)
 target_compile_options(nr_frame_rates PRIVATE ${NR_WARN_FLAGS})
 target_link_libraries(nr_frame_rates PRIVATE nr_frame)
@@ -1384,6 +1384,8 @@ if(NR_BUILD_TESTS)
       src/gpu/test_gpu_telemetry.py
       src/tools/test_release.py
       src/tools/test_native_pins.py
+      src/tools/test_nr_root.py
+      src/tools/test_bench_imports.py
       src/ref/test_frame_cache.py src/ref/test_native_image.py src/ref/test_nr_model.py
       src/ref/test_temporal_controls.py)
     foreach(script ${NR_PY_TESTS})
@@ -1413,7 +1415,7 @@ if(NR_BUILD_TESTS)
       set_tests_properties(test_native_image_threads${threads} PROPERTIES ENVIRONMENT "NR_HOST_THREADS=${threads};${NR_TEST_ENV}")
     endforeach()
     # the profiler's kind tables, read out of the shaders: two passes sharing a number fail
-    nr_ctest(profile_tables "${PY}" "${PROJECT_SOURCE_DIR}/src/bench/frame_profile.py" --tables)
+    nr_ctest(profile_tables "${PY}" "${PROJECT_SOURCE_DIR}/src/bench/frame/frame_profile.py" --tables)
     # the batched feed-forward schedule against the plain one, on the device
     nr_ctest(test_ffn_batch "${PY}" "${PROJECT_SOURCE_DIR}/src/gpu/test_ffn_batch.py" --gpu)
     # the portable GEMM kernels, forced, on a device that has the matrix ones

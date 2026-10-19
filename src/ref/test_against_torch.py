@@ -22,7 +22,6 @@ The switch restores theirs, and this check runs with it on: it is a check of the
 
 from __future__ import annotations
 
-import pathlib
 import sys
 import types
 
@@ -30,8 +29,7 @@ import nr_model as ours
 import numpy as np
 import torch
 
-HERE = pathlib.Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
+from nr_root import ROOT
 
 ours.MLX_DLSS_GRAPH = True
 

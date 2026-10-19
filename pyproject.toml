@@ -18,9 +18,23 @@ build-backend = "hatchling.build"
 
 # One directory per source root: an editable install puts each on `sys.path`, so the
 # modules import by their own names (`xmx`, `nr_model`, `nr_build`, `xmxrt`) with no
-# per-file path setup.
+# per-file path setup. The bench tools are grouped one directory deeper (gemm, kernels,
+# frame, numerics, quality, opendlss) and each group is a source root of its own.
 [tool.hatch.build]
-dev-mode-dirs = ["src", "src/gpu", "src/ref", "src/bench", "src/layer", "src/tools", "scripts"]
+dev-mode-dirs = [
+    "src",
+    "src/gpu",
+    "src/ref",
+    "src/bench/gemm",
+    "src/bench/kernels",
+    "src/bench/frame",
+    "src/bench/numerics",
+    "src/bench/quality",
+    "src/bench/opendlss",
+    "src/layer",
+    "src/tools",
+    "scripts",
+]
 
 [tool.uv]
 # This project targets Intel Xe2, so pull the CPU torch wheels: the default index would

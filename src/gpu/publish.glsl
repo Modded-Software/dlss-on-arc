@@ -13,7 +13,7 @@
  * trip, which changes the bit representation. Intel's Windows compiler does the opposite:
  * it folds the round trip to x and keeps the cast. Where it survives, each is bit-exact
  * against numpy's float16 over ordinary values, half subnormals and overflow to infinity
- * (`src/bench/half_probe.py`), in two instructions and no branches, where doing the
+ * (`src/bench/numerics/half_probe.py`), in two instructions and no branches, where doing the
  * exponent and mantissa by hand took ten and two branches. Through MoltenVK on a GPU that
  * is not Apple's, though, the Metal compiler under it folds both (AMD's and Intel's, on an
  * Intel Mac): there it is done by hand after all, on the float's bits, round to nearest

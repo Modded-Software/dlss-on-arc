@@ -431,7 +431,7 @@ class ResidentFrame:
         raw = None if pooled_here else self.buffer("block0", pixels * 32)
         # Everything the graph publishes is E4M3, which is exact in float16, so every
         # published buffer is stored narrow: half the traffic, and the widening pass in
-        # front of each block's first GEMM disappears. `src/bench/bf16_check.py`.
+        # front of each block's first GEMM disappears. `src/bench/numerics/bf16_check.py`.
         full_skip = self.buffer("full_skip", pixels * 32, np.float16)
         h, w, channels = self.levels[1]
         value = self.buffer("l1", h * w * 32, np.float16)

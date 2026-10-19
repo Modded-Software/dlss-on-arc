@@ -18,7 +18,7 @@ import re
 import subprocess
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+from nr_root import ROOT
 
 # Extensions that are either the vendor's property, derived from it, or somebody else's
 # copyrighted frames. None of them has any business in a source tree.

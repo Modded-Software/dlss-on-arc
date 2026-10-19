@@ -15,13 +15,14 @@ every stage of the daemon's frame is under 2.2 ms (HANDOFF, 2026-10-02).
 
 import ctypes
 import os
-import pathlib
 
 from numpy._core import _multiarray_umath as _umath
 from numpy._core import multiarray as _multiarray
 
+import nr_root
+
 NAME = "nr_keep_blocks"
-LIBRARY = pathlib.Path(__file__).resolve().parents[2] / "work" / "libnr_alloc.dll"
+LIBRARY = nr_root.ROOT / "work" / "libnr_alloc.dll"
 _SET_HANDLER, _GET_HANDLER = (
     304,
     305,

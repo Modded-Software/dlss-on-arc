@@ -13,10 +13,12 @@ from pathlib import Path
 
 from wizard import config, deps, manage, process, state, status
 
+import nr_root
+
 
 def release_root() -> Path:
     here = Path(__file__).resolve().parent
-    return here.parent if (here / "get_weights.py").is_file() else here.parents[1]
+    return here.parent if (here / "get_weights.py").is_file() else nr_root.ROOT
 
 
 def windows_arguments(text: str) -> list[str]:

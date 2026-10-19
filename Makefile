@@ -302,7 +302,7 @@ COMMA := ,
 work/nr_frame: src/ref/nr_frame_main.c work/libnr_frame$(SO) src/ref/nr_frame.h src/ref/nr_image.h
 	$(CC) -O2 -Wall -Wextra -Isrc/ref $(PNG_CFLAGS) -o $@ $< work/libnr_frame$(SO) -Wl,-rpath,$(CURDIR)/work $(PNG_LIBS) $(DL_LIBS) -lm -pthread
 # live_rates.py for the C library: the daemon's frame, end to end, in one process
-work/nr_frame_rates: src/bench/nr_frame_rates.c work/libnr_frame$(SO) src/ref/nr_frame.h src/ref/nr_image.h
+work/nr_frame_rates: src/bench/frame/nr_frame_rates.c work/libnr_frame$(SO) src/ref/nr_frame.h src/ref/nr_image.h
 	$(CC) -O2 -Wall -Wextra -Isrc/ref -o $@ $< work/libnr_frame$(SO) -Wl,-rpath,$(CURDIR)/work -lm
 # test_nr_frame_c.py in C: the library against its own contract, and against the head the
 # Python test writes with --reference, so the bit-identity check survives without Python
@@ -452,12 +452,12 @@ work/gemm_portable_desc.spv: src/gpu/gemm_portable_desc.comp
 work/gemm_portable_batched.spv: src/gpu/gemm_portable_desc.comp
 	$(GLSL) -DBATCHED -o $@ $<
 
-work/half_probe.spv: src/bench/half_probe.comp
+work/half_probe.spv: src/bench/numerics/half_probe.comp
 	$(GLSL) -o $@ $<
 
 bench: all work/half_probe.spv
-	$(PYTHON) src/bench/half_probe.py
-	$(PYTHON) src/bench/split_cost.py
+	$(PYTHON) src/bench/numerics/half_probe.py
+	$(PYTHON) src/bench/frame/split_cost.py
 
 # Sustained GEMM throughput of whatever path the device takes, with each shape run for
 # a wall-clock budget (NR_BENCH_SECONDS) rather than a fixed dispatch count, so a
@@ -465,7 +465,7 @@ bench: all work/half_probe.spv
 # follows the device (16 on Xe2, 8 on Xe-HPG), and each shape is checked against a
 # float32 reference so a wrong kernel cannot read as fast.
 bench-coopmat: all
-	$(PYTHON) src/bench/xmx_throughput.py
+	$(PYTHON) src/bench/gemm/xmx_throughput.py
 
 test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_present work/test_nr_frame $(PLATFORM_TESTS)
 	$(PYTHON) src/gpu/test_ffn_batch.py --gpu
@@ -486,7 +486,9 @@ test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_p
 	$(PYTHON) src/tools/build_check.py
 	$(PYTHON) src/tools/test_release.py
 	$(PYTHON) src/tools/test_native_pins.py
-	$(PYTHON) src/bench/frame_profile.py --tables
+	$(PYTHON) src/tools/test_nr_root.py
+	$(PYTHON) src/tools/test_bench_imports.py
+	$(PYTHON) src/bench/frame/frame_profile.py --tables
 	$(PYTHON) src/gpu/test_gpu_telemetry.py
 	$(PYTHON) src/gpu/test_portable.py
 	XMX_PORTABLE=1 $(PYTHON) src/gpu/test_portable.py
@@ -560,7 +562,10 @@ gpu-test-vulkan: ## GPU tests on Vulkan (XMX_DEVICE=1)
 ab-frame: ## Interleaved A/B, working tree vs HEAD: make ab-frame LABEL=x BACKEND=vulkan
 	bash scripts/ab-frame.sh --label "$(LABEL)" --backend "$(or $(BACKEND),opencl)"
 
-.PHONY: gpu-test-opencl gpu-test-vulkan ab-frame
+bench-check: ## Run the bench tools the build, tests and scripts call, briefly: BACKEND=vulkan
+	bash scripts/bench-check.sh --backend "$(or $(BACKEND),vulkan)" --timeout $(TIMEOUT)
+
+.PHONY: gpu-test-opencl gpu-test-vulkan ab-frame bench-check
 
 # CI variables for the scaffold-ci block below. --append-makefile added the rules but not
 # the template preamble that defines these, so they are defined here. CI_DIR is absolute

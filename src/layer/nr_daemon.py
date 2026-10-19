@@ -50,14 +50,14 @@ import xmx
 from xmxrt.native import DeviceLost
 
 import nr_build
+import nr_root
 
 try:
     import nr_image  # the host passes in C, when they are built
 except ImportError:  # pragma: no cover - the NumPy path is the alternative
     nr_image = None
 
-HERE = pathlib.Path(__file__).resolve().parent
-ROOT = pathlib.Path(os.environ.get("NR_ROOT") or HERE.parents[1])
+ROOT = nr_root.ROOT
 
 MAGIC = 0x304E524E
 MASK_COVERAGE_LIMIT = 0.55  # above this the mask is the scene, not the interface
@@ -549,7 +549,7 @@ hold_floor = nr_frame.hold_floor
 class Meter:
     """How much the network is inventing, live, over pixels the game did not move.
 
-    The same statistic as `src/bench/flicker.py`, but from inside a running game, because
+    The same statistic as `src/bench/quality/flicker.py`, but from inside a running game, because
     a replay cannot reproduce one thing that matters: `--dump` drops the daemon to about
     1.28 fps, so consecutive frames in a capture are four times further apart in game time
     than they are in play, and the history is correspondingly less correct. Keeps its own
@@ -984,7 +984,7 @@ def check_half_rounding(tolerance=0):
 
     `float(float16_t(x))` is correct only while the compiler keeps the conversion. Mesa
     folds it away - 360 428 of 360 704 values came back unrounded when this was written
-    (src/bench/half_probe.py) - and every vendor rounding point in publish.glsl then moves,
+    (src/bench/numerics/half_probe.py) - and every vendor rounding point in publish.glsl then moves,
     per frame, without notice. The graph has been through that once; a driver update must not be
     able to put it back without anyone noticing.
 
@@ -1043,7 +1043,7 @@ def check_half_rounding(tolerance=0):
         raise SystemExit((r.stderr or "the half-rounding probe failed").strip())
 
 
-# What the probe's three outputs are on each runtime (src/bench/half_probe.comp,
+# What the probe's three outputs are on each runtime (src/bench/numerics/half_probe.comp,
 # src/gpu/metal/half_probe.metal, src/gpu/d3d12/half_probe.hlsl): the bit-twiddled rounding,
 # the encode/decode round trip, and the cast. `xmx_half_by_cast()` says which of the last
 # two the runtime's `half_round` is.

@@ -37,8 +37,7 @@ import threading
 import nr_paths
 
 import nr_build
-
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+from nr_root import ROOT
 
 BINARY = nr_build.executable("test_present")
 LAYER = nr_build.BUILD_DIR / "layer-check"  # the manifests, beside the library they name

@@ -10,7 +10,7 @@ for shape in 4096,1024,4096 192,4096,1024 960,1536,512 9216,128,128 36864,128,64
 	for src in opencl_gemm8.cl opencl_gemm8_blk.cl; do
 		for ku in 1 2; do
 			echo "== $src $shape kunroll $ku" >> "$LOG"
-			CL_SRC=$src uv run python src/bench/opencl_gemm8.py --device 1 --check \
+			CL_SRC=$src uv run python src/bench/gemm/opencl_gemm8.py --device 1 --check \
 				--shape "$shape" --kunroll "$ku" --blocks 2x2,4x2,2x4,4x4,8x2,8x4 >> "$LOG" 2>&1
 		done
 	done

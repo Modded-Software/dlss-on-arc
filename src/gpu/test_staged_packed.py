@@ -22,8 +22,7 @@ from pathlib import Path
 import numpy as np
 
 import nr_build
-
-ROOT = Path(__file__).resolve().parents[2]
+from nr_root import ROOT
 
 FILL = -123.125
 GUARD = 64

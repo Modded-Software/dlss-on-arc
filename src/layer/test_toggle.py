@@ -15,7 +15,8 @@ import subprocess
 import sys
 import tempfile
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+from nr_root import ROOT
+
 FAILURES = []
 
 

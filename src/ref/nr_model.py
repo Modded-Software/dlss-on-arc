@@ -34,7 +34,7 @@ CHUNK_TOKENS = int(os.environ.get("NR_CHUNK_TOKENS", str(1 << 13)))
 # The graph MLX-DLSS recovered, where it and the vendor's own differ. The vendor's is the
 # default: OpenDLSS-NR is bit-exact against captures of the original at every block
 # boundary, and one block or one step at a time on its inputs ours agrees with it only
-# its way (`src/bench/opendlss_blocks.py`, notes/opendlss-reference.md). Six places:
+# its way (`src/bench/opendlss/opendlss_blocks.py`, notes/opendlss-reference.md). Six places:
 #   * every feed-forward GEMM reads its input published, its residual the input as it
 #     came - which differ only where the input arrives raw: block 0's stem, the merges
 #     into 66 and 70;
@@ -1074,12 +1074,10 @@ def logical_count(weights):
 def default_weights():
     """`work/mlxw/dlssnr-prepared.safetensors` when it exists, else the logical file
     (nr_build.weights_file; NR_WEIGHTS overrides)."""
-    import pathlib
-
-    root = pathlib.Path(__file__).resolve().parents[2]
     import nr_build
+    import nr_root
 
-    return nr_build.weights_file(root)
+    return nr_build.weights_file(nr_root.ROOT)
 
 
 def load_logical(path, keep_half=False):

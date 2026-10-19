@@ -19,6 +19,7 @@ import tempfile
 import time
 
 import nr_build
+import nr_root
 
 # A detached daemon must not hold the launching terminal's stdin. Bound to a name rather
 # than written inline, following the workspace's own convention for a deliberate,
@@ -134,7 +135,7 @@ def start_daemon(wait=10.0):
         return "daemon wait must be a finite, non-negative number"
     if os.name == "nt":
         wait = min(wait, 60.0)
-    root = os.environ.get("NR_ROOT") or str(DAEMON.resolve().parents[2])
+    root = str(nr_root.ROOT)
     environment = os.environ.copy()
     removed = {
         "VK_LAYER_PATH",

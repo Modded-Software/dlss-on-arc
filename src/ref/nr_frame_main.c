@@ -19,7 +19,7 @@
  *     nr_frame --replay DUMP OUT [--render-scale F] [--temporal F] [--hold F] [--release F]
  *              [--cut-limit F] [--min-extent N] [--no-letterbox] [--profile P] [--intensity F] ...
  *
- * `src/bench/restill.py` without the daemon: a `nr_daemon.py --dump` capture's NNN_in.png
+ * `src/bench/quality/restill.py` without the daemon: a `nr_daemon.py --dump` capture's NNN_in.png
  * frames, in their order, through `nr_frame_live` - the daemon's frame, its letterbox, its
  * render scale and its history - into OUT as NNN_in.png and NNN_out.png, numbered from 001
  * as the daemon's own dump numbers them. The render scale is 1 unless set, as restill's is;

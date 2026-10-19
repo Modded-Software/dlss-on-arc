@@ -15,7 +15,6 @@ Two things are checked separately, because they fail for different reasons:
     python3 src/gpu/test_resident.py
 """
 
-import pathlib
 import sys
 import time
 
@@ -23,9 +22,6 @@ import nr_model as M
 import numpy as np
 from xmxrt import attention, elementwise, gemm, memory
 from xmxrt.recorder import Recorder
-
-HERE = pathlib.Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
 
 WEIGHTS = M.default_weights()  # the prepared file when it is there
 FAILURES = []

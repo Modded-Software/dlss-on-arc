@@ -2,7 +2,7 @@
  * half_probe - does the hardware float16 conversion survive the compiler, and does it round
  * the way the bit-twiddled version does, subnormals and overflow included? The daemon's
  * start-up check (`nr_daemon.check_half_rounding`) runs this as its unary pass with
- * `XMX_UNARY_SPV=half_probe.spv`; `src/bench/half_probe.comp` is the GLSL it mirrors.
+ * `XMX_UNARY_SPV=half_probe.spv`; `src/bench/numerics/half_probe.comp` is the GLSL it mirrors.
  *
  * Three answers, one buffer each: `b` the rounding done by hand on the bits, `c` an encode/decode round trip (`as_type` through a `half2`, the nearest thing Metal has to
  * packHalf2x16), `d` the cast `float(half(x))` - which is what `half_round` in nr_metal.h is

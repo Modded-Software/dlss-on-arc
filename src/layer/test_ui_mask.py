@@ -18,7 +18,8 @@ import time
 import nr_daemon
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+from nr_root import ROOT
+
 WEIGHTS = next(
     (
         p

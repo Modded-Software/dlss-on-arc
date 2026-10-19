@@ -26,7 +26,7 @@ import nr_image
 import nr_model
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+from nr_root import ROOT
 
 SPEC = ROOT / "work" / "mlx-dlss" / "python" / "mlxdlss" / "weight_spec.json"
 failures = []

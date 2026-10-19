@@ -14,14 +14,12 @@ reproduces the CPU path *on the same weights*, so the decode being wrong does no
 invalidate it - it is a kernel test, not a weights test.
 """
 
-from pathlib import Path
-
 import numpy as np
-
-ROOT = Path(__file__).resolve().parents[2]
 from hnet_model import Model
 from hnet_ops import GQA_RATIO, HEAD_DIM, TOKENS, l2_normalize, softmax
 from xmx import gemm
+
+from nr_root import ROOT
 
 
 def attention(blk, tok, mm):

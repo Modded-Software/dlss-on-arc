@@ -23,7 +23,8 @@ import termios
 import threading
 import time
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+from nr_root import ROOT
+
 PANEL = ROOT / "src" / "layer" / "nr-panel"
 FAILURES = []
 

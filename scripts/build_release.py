@@ -17,7 +17,23 @@ import sys
 import tempfile
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+
+def _root() -> Path:
+    """The tree this script belongs to: the checkout, or a release copy of the runtime.
+
+    A bare interpreter runs this file (setup.sh calls get_weights.py with `NR_PYTHON`, and a
+    release copy has no editable install), so `src/nr_root.py` cannot be imported here. It
+    looks for `pyproject.toml` - the checkout's marker - and for `work/`, which a release
+    copy of the runtime always has beside its scripts.
+    """
+    here = Path(__file__).resolve()
+    for candidate in (here, *here.parents):
+        if (candidate / "pyproject.toml").is_file() or (candidate / "work").is_dir():
+            return candidate
+    raise SystemExit(f"cannot find the project root above {here}")
+
+
+ROOT = _root()
 SOURCE_DIRS = ("layer", "ref", "gpu", "bench")
 WINDOWS_UI = ("NR-Setup.cmd", "windows-wizard.ps1")
 WINDOWS_TOOLS = ("windows_wizard.py", "windows_launch.py")

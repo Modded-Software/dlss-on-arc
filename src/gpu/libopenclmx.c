@@ -274,7 +274,7 @@ static const char *GEMM_SRC =
 "            }\n"
 "}\n";
 
-/* ---- the block-read GEMM and its B packing (P1, from src/bench/opencl_gemm8_blk.cl) --- */
+/* ---- the block-read GEMM and its B packing (P1, from src/bench/gemm/opencl_gemm8_blk.cl) --- */
 /* OFF by default (XMX_CL_BLK=1 turns it on). Wired in and passing the isolated GEMM,
  * residual, epilogue and determinism tests, but in the frame it is not yet exact: with the
  * epilogues enabled test_input_fp16.py diverges between the single- and block-schedules, and

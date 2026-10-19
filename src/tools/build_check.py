@@ -15,11 +15,11 @@ In this tree the native passes split their rows on `nr_image.c`'s own thread poo
 OpenMP (Apple's clang has none, MSVC's is 2.0), so the check is for the pool's threads.
 """
 
-import pathlib
 import re
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+from nr_root import ROOT
+
 FAILURES = []
 
 

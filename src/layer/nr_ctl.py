@@ -24,14 +24,14 @@ a terminal would mean alt-tabbing out of it.
 """
 
 import json
-import os
-import pathlib
 import sys
 import textwrap
 
 import cv2
 import nr_knobs
 import nr_paths
+
+import nr_root
 
 SETTINGS, TRIGGER, SOCKET = nr_paths.SETTINGS, nr_paths.TRIGGER, nr_paths.SOCKET
 read, write, alive = nr_paths.read, nr_paths.write, nr_paths.alive
@@ -62,7 +62,7 @@ ALIAS = {
 # The network's cost follows the extent it is given and nothing else, but at these sizes
 # the numpy either side of it - feature assembly and composition, both at the output
 # resolution - is the larger half, so the swapchain size matters as much as the scale.
-RATES = nr_knobs.RATES  # measured; see src/bench/live_rates.py
+RATES = nr_knobs.RATES  # measured; see src/bench/frame/live_rates.py
 
 
 def _opencv():
@@ -147,7 +147,7 @@ def report(lines=8):
     running, on which GPU, with which knobs, and what the daemon said about the last frames
     - including the ones it refused.
     """
-    here = pathlib.Path(os.environ.get("NR_ROOT") or pathlib.Path(__file__).resolve().parents[2])
+    here = nr_root.ROOT
     print(f"  version   {_version(here)}")
     status()
     log = nr_paths.LOG

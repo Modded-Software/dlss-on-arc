@@ -15,12 +15,12 @@ same line or the two around it, so that a reader meeting it also meets the retra
     python3 src/tools/claims_check.py          # exit 1 and name every survivor
 """
 
-import pathlib
 import re
 import subprocess
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+from nr_root import ROOT
+
 SELF = "src/tools/claims_check.py"
 EXEMPT = ("notes/",)
 NEAR = 2  # lines either side that count as "beside"

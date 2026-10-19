@@ -24,8 +24,8 @@ import subprocess
 import sys
 import tempfile
 
-HERE = pathlib.Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
+from nr_root import ROOT
+
 FAILURES = []
 CHILD = r"""
 import ctypes, json, os, pathlib, sys

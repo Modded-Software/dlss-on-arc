@@ -6,7 +6,6 @@ built. They were already in the recovered pipeline; this exercises them, and the
 scale that the panel calls Motion Scale X/Y Multiplier.
 """
 
-import pathlib
 import sys
 
 import image_io
@@ -14,7 +13,9 @@ import nr_frame
 import nr_temporal
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+import nr_root
+
+ROOT = nr_root.ROOT
 
 FAILURES = []
 

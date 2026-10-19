@@ -86,7 +86,7 @@ for round in $(seq 1 "$ROUNDS"); do
       tag="${sz// /x}"
       LOG="$OUT/prof-$v-$round-$tag.log"
       # shellcheck disable=SC2086  # the size is two words on purpose
-      if ! timeout 900 uv run python src/bench/frame_profile.py --size $sz --runs "$RUNS" \
+      if ! timeout 900 uv run python src/bench/frame/frame_profile.py --size $sz --runs "$RUNS" \
            --seconds "$SECONDS_EACH" --calls "$CALLS" > "$LOG" 2>&1; then
         say "PROFILE FAILED $v round $round $tag (see $LOG)"
         OK=0

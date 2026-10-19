@@ -34,6 +34,8 @@ from hnet_ops import (
     window_reverse,
 )
 
+import nr_root
+
 # stage width -> (H, W) of the feature map
 GEOMETRY = {
     32: (512, 256),
@@ -109,7 +111,7 @@ def main():
             calls[0] += 1
             return A.astype(np.float32) @ B.astype(np.float32)
 
-    m = Model(str(Path(__file__).resolve().parents[2] / "work" / "weights_ht.bin"))
+    m = Model(str(nr_root.ROOT / "work" / "weights_ht.bin"))
     rng = np.random.default_rng(0)
     x = (rng.standard_normal((512, 256, 32)) * 0.5).astype(np.float32)
     print("=== forward pass through all %d blocks ===\n" % len(m.blocks))

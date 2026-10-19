@@ -3,7 +3,7 @@
 
 Each published image is a frame the owner chose from a capture, cut and laid out as written
 below; this is the record of which frame and which pixels, so a new graph can be shown on the
-same frames (`src/bench/restill.py` re-renders a capture) and the table measured the same way.
+same frames (`src/bench/quality/restill.py` re-renders a capture) and the table measured the same way.
 
     python3 src/tools/comparisons.py work/restill OUT     # the captures re-rendered, by game
     python3 src/tools/comparisons.py --original OUT       # as captured on 2026-09-16
@@ -19,10 +19,10 @@ import pathlib
 import subprocess
 import tempfile
 
+import image_io
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-import image_io
+from nr_root import ROOT
 
 # The captures of 2026-09-16, by game: work/<capture>/NNN_{in,out}.png from the daemon's dump.
 ORIGINAL = {"tekken": "tekken", "doa5": "doa5cap", "mk1": "mk1cap"}

@@ -25,7 +25,9 @@ import nr_daemon
 import nr_frame
 import numpy as np
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
+import nr_root
+
+ROOT = nr_root.ROOT
 
 WEIGHTS = nr_frame.WEIGHTS  # the prepared file when it is there
 

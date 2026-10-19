@@ -89,7 +89,7 @@ call :shader_def gemm_staged32_deep gemm_staged "-DSTAGED_BM=32" "-DSTAGED_BK=64
 call :shader_def attention_rows     attention   "-DROW_LANES=256"
 call :shader_def attention_ab       attention   "-DSOFTMAX_AB"
 rem The daemon's start-up probe, whose source is a bench tool rather than a graph shader.
-"%GLSL%" --target-env vulkan1.3 -I"%GPU%" -o "%WORK%\half_probe.spv" "%REPO%\src\bench\half_probe.comp" >nul 2>&1
+"%GLSL%" --target-env vulkan1.3 -I"%GPU%" -o "%WORK%\half_probe.spv" "%REPO%\src\bench\numerics\half_probe.comp" >nul 2>&1
 if exist "%WORK%\half_probe.spv" (echo   half_probe.spv) else (echo   half_probe.spv FAILED)
 
 rem ---- libxmx.dll ----
@@ -187,7 +187,7 @@ echo daemon at this checkout, so nothing has to be copied into the game folder.
 endlocal
 exit /b 0
 
-rem ---- :shader <name> - one .comp -> .spv, from src/gpu or src/bench ----
+rem ---- :shader <name> - one .comp -> .spv, from src/gpu or src/bench/numerics ----
 rem
 rem No per-driver defines. Intel's Windows compiler folds half_round's packHalf2x16 round
 rem trip to x (90109 of 90368 values on the B580's 101.8993, the same on the Arc 140V's
@@ -195,13 +195,13 @@ rem 101.9033), so libxmx gives every pipeline the float16_t cast there instead, 
 rem driver it finds, through specialisation constant 1. The attention shaders' softmax
 rem uses packHalf2x16 only as a bit trick on the packed word, which the fold does not touch.
 rem
-rem Two sources, not one: the runtime's shaders live in src/gpu and the probe in src/bench,
+rem Two sources, not one: the runtime's shaders live in src/gpu and the probe in src/bench/numerics,
 rem and the Makefile builds both. A missing source is an error here rather than a quiet
 rem skip - looking only in src/gpu once made `call :shader half_probe` fall through in
 rem silence, and a daemon spawned by the layer then died on the next thing that assumed it.
 :shader
 set "SRC=%GPU%\%1.comp"
-if not exist "%SRC%" set "SRC=%REPO%\src\bench\%1.comp"
+if not exist "%SRC%" set "SRC=%REPO%\src\bench\numerics\%1.comp"
 if not exist "%SRC%" (echo ERROR: no source for %1.comp & exit /b 1)
 "%GLSL%" --target-env vulkan1.3 -I"%GPU%" -o "%WORK%\%1.spv" "%SRC%" >nul 2>&1
 if exist "%WORK%\%1.spv" (echo   %1.spv) else (echo   %1.spv FAILED)

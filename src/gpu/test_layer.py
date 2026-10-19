@@ -26,8 +26,7 @@ import numpy as np
 from hnet_model import Model
 
 import nr_build
-
-ROOT = Path(__file__).resolve().parents[2]
+from nr_root import ROOT
 
 RUNNER, SPV = nr_build.executable("gemm_runner"), nr_build.shader("gemm_coopmat.spv")
 

@@ -95,7 +95,7 @@ class LaunchTests(unittest.TestCase):
         self.config = self.steam.parent / "userdata/123/config/localconfig.vdf"
         self.config.parent.mkdir(parents=True)
         self.config.write_bytes(localconfig())
-        self.manifest = self.game.parents[1] / "appmanifest_379720.acf"
+        self.manifest = self.base / "library (games)/steamapps/appmanifest_379720.acf"
         self.manifest.write_text(
             '"AppState" { "appid" "379720" "installdir" "DOOM" }', encoding="utf-8"
         )

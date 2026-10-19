@@ -26,7 +26,6 @@ game.
 from __future__ import annotations
 
 import argparse
-import pathlib
 import time
 
 import image_io
@@ -34,9 +33,6 @@ import nr_frame
 import nr_model
 import numpy as np
 from xmxrt import elementwise
-
-HERE = pathlib.Path(__file__).resolve().parent
-ROOT = HERE.parents[1]
 
 features_mod, composition_mod, _motion_mod, temporal_mod = nr_frame.load_mlx_numpy_modules()
 

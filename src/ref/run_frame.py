@@ -15,11 +15,8 @@ are recovered; everything between them is the recovered network.
 
 import sys
 import time
-from pathlib import Path
 
 import numpy as np
-
-HERE = Path(__file__).resolve().parent
 from hnet_model import Model
 from hnet_ops import (
     GQA_RATIO,
@@ -39,6 +36,8 @@ from image_io import (
     save,
     smooth_pattern,
 )
+
+import nr_root
 
 GEOMETRY = {
     32: (512, 256),
@@ -160,7 +159,7 @@ def main():
         if use_gpu
         else (lambda A, B: A.astype(np.float32) @ B.astype(np.float32))
     )
-    root = HERE.parents[1]
+    root = nr_root.ROOT
     src = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else None
     if src:
         # A real frame is the CLEAN reference; the noise is added here, exactly as for
