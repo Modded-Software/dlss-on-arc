@@ -31,7 +31,9 @@
 #include "overlay_vert.h"
 
 #define MAX_CARDS 8
-#define HISTORY 60
+#define HISTORY 3600
+#define TOP_METRICS 4
+#define RANGE_COUNT 3
 #define MAX_SWAP_IMAGES 8
 #define MAX_VERTICES 65536
 #define ENGINE_COUNT 5
@@ -49,6 +51,9 @@ static const char *ENGINE_KEYS[ENGINE_COUNT] = {
 static const char *ENGINE_NAMES[ENGINE_COUNT] = {
     "render", "copy", "video", "video_enhance", "compute"
 };
+
+static const char *RANGE_LABELS[RANGE_COUNT] = {"1m", "15min", "1h"};
+static const int RANGE_SAMPLES[RANGE_COUNT] = {60, 900, 3600};
 
 
 #ifndef ShapeInput
@@ -78,8 +83,10 @@ static const Color C_DIM = {0.55f, 0.61f, 0.70f, 1.0f};
 static const Color C_UNIT = {0.30f, 0.75f, 1.0f, 1.0f};
 static const Color C_LINE = {0.22f, 0.28f, 0.37f, 0.7f};
 static const Color C_ACCENT = {0.30f, 0.75f, 1.0f, 1.0f};
+
 static const Color C_GREEN = {0.25f, 0.85f, 0.45f, 1.0f};
-static const Color C_AMBER = {0.95f, 0.65f, 0.20f, 1.0f};
+static const Color C_YELLOW = {0.95f, 0.90f, 0.25f, 1.0f};
+static const Color C_ORANGE = {1.0f, 0.55f, 0.18f, 1.0f};
 static const Color C_RED = {1.0f, 0.28f, 0.25f, 1.0f};
 static const Color C_BAR_BG = {1.0f, 1.0f, 1.0f, 0.10f};
 
@@ -123,7 +130,8 @@ typedef struct {
     int pcie_width;
     int throttled;
     char throttle[96];
-    double hist[HISTORY];
+    double hist[TOP_METRICS][HISTORY];
+    double last_hist_time;
     double last_client_scan;
     DrmClientSnapshot clients[MAX_DRM_CLIENTS];
     int nclients;
@@ -227,9 +235,22 @@ typedef struct {
     int hidden;
     int dragging;
     int tab;
+    int graph_metric;
+    int graph_range;
+    int range_open;
+    int range_owner;
     HitRect tab_hits[MAX_CARDS * 2];
     int tab_hit_tabs[MAX_CARDS * 2];
     int tab_hit_count;
+    HitRect metric_hits[MAX_CARDS * TOP_METRICS];
+    int metric_hit_metrics[MAX_CARDS * TOP_METRICS];
+    int metric_hit_count;
+    HitRect range_toggle_hits[MAX_CARDS];
+    int range_toggle_gpus[MAX_CARDS];
+    int range_toggle_count;
+    HitRect range_hits[RANGE_COUNT];
+    int range_hit_ranges[RANGE_COUNT];
+    int range_hit_count;
     int drag_root_x, drag_root_y;
     int drag_win_x, drag_win_y;
     VkCtx vk;
@@ -731,8 +752,9 @@ static int gpu_discover(Gpu *gpus, int max)
         g->power_w = NAN;
         g->rc6_pct = NAN;
         g->power_limit_w = 0.0;
-        for (int h = 0; h < HISTORY; h++)
-            g->hist[h] = NAN;
+        for (int m = 0; m < TOP_METRICS; m++)
+            for (int h = 0; h < HISTORY; h++)
+                g->hist[m][h] = NAN;
         for (int e = 0; e < ENGINE_COUNT; e++)
             g->engine_pct[e] = NAN;
         g->engine_busy_pct = NAN;
@@ -771,6 +793,8 @@ static int gpu_discover(Gpu *gpus, int max)
     globfree(&gl);
     return n;
 }
+
+static double gpu_mem_pct(const Gpu *g);
 
 static void gpu_sample(Gpu *g, double now)
 {
@@ -846,9 +870,6 @@ static void gpu_sample(Gpu *g, double now)
         g->rc6_pct = NAN;
     }
 
-    memmove(&g->hist[0], &g->hist[1], sizeof(g->hist[0]) * (HISTORY - 1));
-    g->hist[HISTORY - 1] = g->power_w;
-
     g->has_energy = has_energy;
     if (has_energy)
         g->energy = energy;
@@ -859,6 +880,20 @@ static void gpu_sample(Gpu *g, double now)
 
     gpu_read_throttle(g);
     gpu_scan_clients(g, now);
+
+    if (g->last_hist_time <= 0.0 || now - g->last_hist_time >= 1.0) {
+        double values[TOP_METRICS];
+        values[0] = g->power_w;
+        values[1] = g->temp_c >= 0 ? (double)g->temp_c : NAN;
+        values[2] = g->engine_busy_pct;
+        values[3] = gpu_mem_pct(g);
+        for (int m = 0; m < TOP_METRICS; m++) {
+            memmove(&g->hist[m][0], &g->hist[m][1],
+                    sizeof(g->hist[m][0]) * (HISTORY - 1));
+            g->hist[m][HISTORY - 1] = values[m];
+        }
+        g->last_hist_time = now;
+    }
 }
 
 static void gpu_update_all(App *app)
@@ -1265,12 +1300,18 @@ static int canvas_textf(Canvas *c, int x, int y, int scale, Color col, const cha
     return canvas_text(c, x, y, scale, col, buf);
 }
 
-static void canvas_value_unit(Canvas *c, int x, int y, const char *value, const char *unit)
+static void canvas_value_unit_colored(Canvas *c, int x, int y, const char *value,
+                                      const char *unit, Color value_col, Color unit_col)
 {
-    int width = canvas_text(c, x, y, 1, C_TEXT, value);
+    int width = canvas_text(c, x, y, 1, value_col, value);
     int unit_h = (int)((float)c->font->glyph_h * 0.75f + 0.5f);
     int unit_y = y + c->font->glyph_h - unit_h;
-    canvas_text_scaled(c, x + width, unit_y, 0.75f, C_UNIT, unit);
+    canvas_text_scaled(c, x + width, unit_y, 0.75f, unit_col, unit);
+}
+
+static void canvas_value_unit(Canvas *c, int x, int y, const char *value, const char *unit)
+{
+    canvas_value_unit_colored(c, x, y, value, unit, C_TEXT, C_UNIT);
 }
 
 static void canvas_graph(Canvas *c, int x, int y, int w, int h,
@@ -1285,6 +1326,35 @@ static void canvas_graph(Canvas *c, int x, int y, int w, int h,
     }
     if (!(maximum > 0.0))
         maximum = 200.0;
+
+    if (n > w) {
+        for (int px = 0; px < w; px++) {
+            int start = px * n / w;
+            int end = (px + 1) * n / w;
+            double sum = 0.0;
+            int used = 0;
+            for (int i = start; i < end; i++) {
+                double v = hist[i];
+                if (isnan(v) || v < 0.0)
+                    continue;
+                sum += v;
+                used++;
+            }
+            if (used == 0)
+                continue;
+            double v = sum / used;
+            double f = v / maximum;
+            if (f > 1.0)
+                f = 1.0;
+            float bh = (float)h * (float)f;
+            if (bh < 1.0f && v > 0.0)
+                bh = 1.0f;
+            float by = (float)y + (float)h - bh;
+            canvas_rect(c, (float)(x + px), by, 1.0f, bh, col);
+        }
+        return;
+    }
+
     float bar_w = (float)w / (float)n;
     float draw_w = bar_w > 2.0f ? bar_w - 1.0f : bar_w;
     for (int i = 0; i < n; i++) {
@@ -1303,26 +1373,37 @@ static void canvas_graph(Canvas *c, int x, int y, int w, int h,
     }
 }
 
-static Color temp_color(int temp)
+static Color ramp_color(double value, double limit)
 {
-    if (temp < 0)
+    static const double stops[5] = {0.0, 0.35, 0.60, 0.85, 1.0};
+    static const Color colors[5] = {
+        C_TEXT, C_GREEN, C_YELLOW, C_ORANGE, C_RED
+    };
+    if (isnan(value) || !(limit > 0.0))
         return C_DIM;
-    if (temp < 70)
-        return C_GREEN;
-    if (temp < 85)
-        return C_AMBER;
-    return C_RED;
+    double f = value / limit;
+    if (f < 0.0)
+        f = 0.0;
+    if (f > 1.0)
+        f = 1.0;
+    int i = 0;
+    while (i < 4 && f > stops[i + 1])
+        i++;
+    double span = stops[i + 1] - stops[i];
+    float t = span > 0.0 ? (float)((f - stops[i]) / span) : 0.0f;
+    Color c;
+    c.r = colors[i].r + (colors[i + 1].r - colors[i].r) * t;
+    c.g = colors[i].g + (colors[i + 1].g - colors[i].g) * t;
+    c.b = colors[i].b + (colors[i + 1].b - colors[i].b) * t;
+    c.a = 1.0f;
+    return c;
 }
 
-static Color load_color(double pct)
+static double gpu_mem_pct(const Gpu *g)
 {
-    if (isnan(pct))
-        return C_DIM;
-    if (pct < 70.0)
-        return C_GREEN;
-    if (pct < 90.0)
-        return C_AMBER;
-    return C_RED;
+    if (!g->clients_scanned || g->mem_total_bytes == 0)
+        return NAN;
+    return 100.0 * (double)g->mem_resident_bytes / (double)g->mem_total_bytes;
 }
 
 static const char *model_short(const char *model, char *buf, size_t n)
@@ -1350,6 +1431,60 @@ static const char *model_short(const char *model, char *buf, size_t n)
     return buf;
 }
 
+static void draw_range_dropdown(App *app, Gpu *g, int x, int y)
+{
+    Canvas *c = &app->canvas;
+    FontAtlas *f = &app->font;
+    const char *label = RANGE_LABELS[app->graph_range];
+    int box_w = 5 * f->advance + 26;
+    int box_h = f->glyph_h + 6;
+    int menu_y = y + box_h + 2;
+    int item_h = f->glyph_h + 4;
+
+    canvas_rect(c, (float)x, (float)y, (float)box_w, (float)box_h, C_BAR_BG);
+    canvas_rect(c, (float)x, (float)y, (float)box_w, 1.0f, C_LINE);
+    canvas_rect(c, (float)x, (float)(y + box_h - 1), (float)box_w, 1.0f, C_LINE);
+    canvas_rect(c, (float)x, (float)y, 1.0f, (float)box_h, C_LINE);
+    canvas_rect(c, (float)(x + box_w - 1), (float)y, 1.0f, (float)box_h, C_LINE);
+    canvas_text(c, x + 6, y + 3, 1, C_TEXT, label);
+    canvas_text(c, x + box_w - 14, y + 3, 1, C_DIM, "v");
+
+    if (app->range_toggle_count < MAX_CARDS) {
+        HitRect *hit = &app->range_toggle_hits[app->range_toggle_count];
+        hit->x0 = x;
+        hit->y0 = y;
+        hit->x1 = x + box_w;
+        hit->y1 = y + box_h;
+        app->range_toggle_gpus[app->range_toggle_count] = g->index;
+        app->range_toggle_count++;
+    }
+
+    if (!app->range_open || app->range_owner != g->index)
+        return;
+
+    int menu_h = item_h * RANGE_COUNT;
+    canvas_rect(c, (float)x, (float)menu_y, (float)box_w, (float)menu_h, C_BG);
+    canvas_rect(c, (float)x, (float)menu_y, (float)box_w, 1.0f, C_LINE);
+    canvas_rect(c, (float)x, (float)(menu_y + menu_h - 1), (float)box_w, 1.0f, C_LINE);
+    canvas_rect(c, (float)x, (float)menu_y, 1.0f, (float)menu_h, C_LINE);
+    canvas_rect(c, (float)(x + box_w - 1), (float)menu_y, 1.0f, (float)menu_h, C_LINE);
+
+    for (int i = 0; i < RANGE_COUNT; i++) {
+        int iy = menu_y + i * item_h;
+        Color col = app->graph_range == i ? C_ACCENT : C_TEXT;
+        canvas_text(c, x + 6, iy + 2, 1, col, RANGE_LABELS[i]);
+        if (app->range_hit_count < RANGE_COUNT) {
+            HitRect *hit = &app->range_hits[app->range_hit_count];
+            hit->x0 = x;
+            hit->y0 = iy;
+            hit->x1 = x + box_w;
+            hit->y1 = iy + item_h;
+            app->range_hit_ranges[app->range_hit_count] = i;
+            app->range_hit_count++;
+        }
+    }
+}
+
 static void draw_gpu_block(App *app, Gpu *g, int x, int y, int w, int h)
 {
     Canvas *c = &app->canvas;
@@ -1369,39 +1504,53 @@ static void draw_gpu_block(App *app, Gpu *g, int x, int y, int w, int h)
                      g->pcie_gen, g->pcie_width);
     gy += 66;
 
-    static const char *top_labels[4] = {"PWR", "TMP", "ENG", "MEM"};
-    for (int i = 0; i < 4; i++)
-        canvas_text(c, x + i * colw, gy, 1, C_DIM, top_labels[i]);
+    static const char *top_labels[TOP_METRICS] = {"PWR", "TMP", "ENG", "MEM"};
+    static const char *top_units[TOP_METRICS] = {"W", "C", "%", "%"};
+    int top_y = gy;
+    for (int i = 0; i < TOP_METRICS; i++) {
+        Color label_col = app->graph_metric == i ? C_ACCENT : C_DIM;
+        canvas_text(c, x + i * colw, top_y, 1, label_col, top_labels[i]);
+    }
     gy += line;
 
-    char pwr[32] = "--";
-    char tmp[32] = "--";
-    char eng[32] = "--";
-    char mem[32] = "--";
-    double mem_pct = NAN;
-    if (!isnan(g->power_w))
-        snprintf(pwr, sizeof(pwr), "%.0fW", g->power_w);
-    if (g->temp_c >= 0)
-        snprintf(tmp, sizeof(tmp), "%dC", g->temp_c);
-    if (!isnan(g->engine_busy_pct))
-        snprintf(eng, sizeof(eng), "%.0f%%", g->engine_busy_pct);
-    if (g->clients_scanned && g->mem_total_bytes > 0) {
-        mem_pct = 100.0 * (double)g->mem_resident_bytes / (double)g->mem_total_bytes;
-        snprintf(mem, sizeof(mem), "%.0f%%", mem_pct);
-    } else if (g->clients_scanned) {
-        snprintf(mem, sizeof(mem), "--");
+    double values[TOP_METRICS];
+    double limits[TOP_METRICS];
+    values[0] = g->power_w;
+    values[1] = g->temp_c >= 0 ? (double)g->temp_c : NAN;
+    values[2] = g->engine_busy_pct;
+    values[3] = gpu_mem_pct(g);
+    limits[0] = power_max;
+    limits[1] = 100.0;
+    limits[2] = 100.0;
+    limits[3] = 100.0;
+
+    for (int i = 0; i < TOP_METRICS; i++) {
+        int vx = x + i * colw;
+        if (isnan(values[i])) {
+            canvas_text(c, vx, gy, 1, C_DIM, "--");
+        } else {
+            char value[32];
+            snprintf(value, sizeof(value), "%.0f", values[i]);
+            Color col = ramp_color(values[i], limits[i]);
+            canvas_value_unit_colored(c, vx, gy, value, top_units[i], col, col);
+        }
+        if (app->metric_hit_count < MAX_CARDS * TOP_METRICS) {
+            HitRect *hit = &app->metric_hits[app->metric_hit_count];
+            hit->x0 = vx - 2;
+            hit->y0 = top_y - 2;
+            hit->x1 = vx + colw - 6;
+            hit->y1 = gy + f->glyph_h + 2;
+            app->metric_hit_metrics[app->metric_hit_count] = i;
+            app->metric_hit_count++;
+        }
     }
-    canvas_text(c, x, gy, 1, C_TEXT, pwr);
-    canvas_text(c, x + colw, gy, 1, temp_color(g->temp_c), tmp);
-    canvas_text(c, x + 2 * colw, gy, 1, load_color(g->engine_busy_pct), eng);
-    canvas_text(c, x + 3 * colw, gy, 1, load_color(mem_pct), mem);
     gy += line + 4;
 
     canvas_rect(c, x, (float)gy, (float)w, 1.0f, C_LINE);
     gy += 5;
 
     int tab_x[2] = {x, x + 105};
-    static const char *tab_names[2] = {"POWER 60s", "DETAILS"};
+    static const char *tab_names[2] = {"GRAPH", "DETAILS"};
     for (int i = 0; i < 2; i++) {
         canvas_text(c, tab_x[i], gy, 1, tab == i ? C_ACCENT : C_DIM, tab_names[i]);
         if (tab == i)
@@ -1420,15 +1569,33 @@ static void draw_gpu_block(App *app, Gpu *g, int x, int y, int w, int h)
     gy += line + 14;
 
     if (tab == 0) {
-        canvas_textf(c, x + w - 40, gy, 1, C_DIM, "%.0fW", power_max);
+        double limit = app->graph_metric == 0 ? power_max : 100.0;
+        char max_label[32];
+        if (app->graph_metric == 0)
+            snprintf(max_label, sizeof(max_label), "%.0fW", limit);
+        else if (app->graph_metric == 1)
+            snprintf(max_label, sizeof(max_label), "%.0fC", limit);
+        else
+            snprintf(max_label, sizeof(max_label), "%.0f%%", limit);
+
+        int max_x = x + w - (int)strlen(max_label) * f->advance;
+        canvas_text(c, max_x, gy, 1, C_DIM, max_label);
+
+        int row_y = gy;
         gy += line;
+
+        int count = RANGE_SAMPLES[app->graph_range];
+        if (count > HISTORY)
+            count = HISTORY;
+        const double *hist = &g->hist[app->graph_metric][HISTORY - count];
 
         int graph_h = y + h - gy - 4;
         if (graph_h > 135)
             graph_h = 135;
         if (graph_h < 30)
             graph_h = 30;
-        canvas_graph(c, x, gy, w, graph_h, g->hist, HISTORY, power_max, C_ACCENT);
+        canvas_graph(c, x, gy, w, graph_h, hist, count, limit, C_ACCENT);
+        draw_range_dropdown(app, g, x, row_y);
         return;
     }
 
@@ -1523,6 +1690,9 @@ static void draw_scene(App *app)
     FontAtlas *f = &app->font;
     canvas_reset(c);
     app->tab_hit_count = 0;
+    app->metric_hit_count = 0;
+    app->range_toggle_count = 0;
+    app->range_hit_count = 0;
 
     int W = app->w;
     int H = app->h;
@@ -3015,26 +3185,78 @@ int main(int argc, char **argv)
                 dirty = 1;
             } else if (ev.type == ButtonPress) {
                 if (ev.xbutton.button == Button1) {
-                    int hit = -1;
+                    int handled = 0;
                     for (int i = 0; i < app.tab_hit_count; i++) {
                         HitRect *r = &app.tab_hits[i];
                         if (ev.xbutton.x >= r->x0 && ev.xbutton.x <= r->x1 &&
                             ev.xbutton.y >= r->y0 && ev.xbutton.y <= r->y1) {
-                            hit = app.tab_hit_tabs[i];
+                            int hit = app.tab_hit_tabs[i];
+                            if (app.tab != hit) {
+                                app.tab = hit;
+                                dirty = 1;
+                            }
+                            app.range_open = 0;
+                            handled = 1;
                             break;
                         }
                     }
-                    if (hit >= 0) {
-                        if (app.tab != hit) {
-                            app.tab = hit;
+                    if (!handled) {
+                        for (int i = 0; i < app.metric_hit_count; i++) {
+                            HitRect *r = &app.metric_hits[i];
+                            if (ev.xbutton.x >= r->x0 && ev.xbutton.x <= r->x1 &&
+                                ev.xbutton.y >= r->y0 && ev.xbutton.y <= r->y1) {
+                                app.graph_metric = app.metric_hit_metrics[i];
+                                app.tab = 0;
+                                app.range_open = 0;
+                                dirty = 1;
+                                handled = 1;
+                                break;
+                            }
+                        }
+                    }
+                    if (!handled && app.range_open) {
+                        for (int i = 0; i < app.range_hit_count; i++) {
+                            HitRect *r = &app.range_hits[i];
+                            if (ev.xbutton.x >= r->x0 && ev.xbutton.x <= r->x1 &&
+                                ev.xbutton.y >= r->y0 && ev.xbutton.y <= r->y1) {
+                                app.graph_range = app.range_hit_ranges[i];
+                                app.range_open = 0;
+                                dirty = 1;
+                                handled = 1;
+                                break;
+                            }
+                        }
+                    }
+                    if (!handled) {
+                        for (int i = 0; i < app.range_toggle_count; i++) {
+                            HitRect *r = &app.range_toggle_hits[i];
+                            if (ev.xbutton.x >= r->x0 && ev.xbutton.x <= r->x1 &&
+                                ev.xbutton.y >= r->y0 && ev.xbutton.y <= r->y1) {
+                                int gpu = app.range_toggle_gpus[i];
+                                if (app.range_open && app.range_owner == gpu)
+                                    app.range_open = 0;
+                                else {
+                                    app.range_open = 1;
+                                    app.range_owner = gpu;
+                                }
+                                dirty = 1;
+                                handled = 1;
+                                break;
+                            }
+                        }
+                    }
+                    if (!handled) {
+                        if (app.range_open) {
+                            app.range_open = 0;
                             dirty = 1;
                         }
-                    } else if (app.opt.draggable) {
-                        app.dragging = 1;
-                        app.drag_root_x = ev.xbutton.x_root;
-                        app.drag_root_y = ev.xbutton.y_root;
-                        app.drag_win_x = app.x;
-                        app.drag_win_y = app.y;
+                        if (app.opt.draggable) {
+                            app.dragging = 1;
+                            app.drag_root_x = ev.xbutton.x_root;
+                            app.drag_root_y = ev.xbutton.y_root;
+                            app.drag_win_x = app.x;
+                            app.drag_win_y = app.y;
+                        }
                     }
                 }
             } else if (ev.type == MotionNotify) {
@@ -3065,6 +3287,7 @@ int main(int argc, char **argv)
                     g_running = 0;
                 } else if (ks == XK_Tab) {
                     app.tab = !app.tab;
+                    app.range_open = 0;
                     dirty = 1;
                 }
             }
