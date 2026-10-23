@@ -467,6 +467,15 @@ bench: all work/half_probe.spv
 bench-coopmat: all
 	$(PYTHON) src/bench/gemm/xmx_throughput.py
 
+gpu-overlay: ## Build the GPU telemetry overlay (X11 + Vulkan)
+	$(MAKE) -C src/overlay
+
+run-gpu-overlay: gpu-overlay ## Run the GPU overlay with dragging enabled
+	work/gpu_overlay --draggable
+
+test-gpu-overlay: gpu-overlay ## Run the headless GPU overlay tests
+	$(PYTHON) src/overlay/test_gpu_overlay.py
+
 test: all work/attention_ab.spv work/test_exchange work/test_settled work/test_present work/test_nr_frame $(PLATFORM_TESTS)
 	$(PYTHON) src/gpu/test_ffn_batch.py --gpu
 	$(PYTHON) src/gpu/test_gemm_contract.py
@@ -548,7 +557,7 @@ prepare-weights: work/nr_frame
 	mkdir -p work/mlxw
 	work/nr_frame --prepare work/mlxw/dlssnr-prepared.safetensors --weights work/mlxw/dlssnr-logical.safetensors
 
-.PHONY: all test test-metal test-ffn test-proton bench bench-coopmat publish-check prepare-weights
+.PHONY: all test test-metal test-ffn test-proton bench bench-coopmat publish-check prepare-weights gpu-overlay run-gpu-overlay test-gpu-overlay
 
 # Per-backend GPU gate matrix (scripts/gpu-test.sh) and the interleaved HEAD/working-tree
 # frame A/B (scripts/ab-frame.sh). TIMEOUT per test; LABEL names notes/runs/ab-LABEL/.
