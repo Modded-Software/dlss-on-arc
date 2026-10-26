@@ -5,6 +5,7 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 #include <X11/keysym.h>
+#include <X11/cursorfont.h>
 #include <vulkan/vulkan.h>
 
 #include <ctype.h>
@@ -234,6 +235,9 @@ typedef struct {
     int x, y, w, h;
     int hidden;
     int hovered;
+    Cursor hand_cursor;
+    int have_hand_cursor;
+    int cursor_hand_on;
     int dragging;
     int compact;
     int expanded_h;
@@ -1657,169 +1661,89 @@ static void draw_gpu_block(App *app, Gpu *g, int x, int y, int w, int h)
         return;
     }
 
-    int rx;
-
-    char lim_val[32];
-    int lim_w;
+    char value[32];
+    canvas_text(c, x, gy, 1, C_DIM, "LIM");
     if (g->power_limit_w > 0.0) {
-        snprintf(lim_val, sizeof(lim_val), "%.0f", g->power_limit_w);
-        lim_w = value_unit_px(app, lim_val, "W");
+        snprintf(value, sizeof(value), "%.0f", g->power_limit_w);
+        canvas_value_unit(c, x + 42, gy, value, "W");
     } else {
-        snprintf(lim_val, sizeof(lim_val), "--");
-        lim_w = text_px(app, lim_val, 1.0f);
+        canvas_text(c, x + 42, gy, 1, C_DIM, "--");
     }
-    char volt_val[32];
-    int volt_w;
     if (g->voltage_mv < 0) {
-        snprintf(volt_val, sizeof(volt_val), "--");
-        volt_w = text_px(app, volt_val, 1.0f);
+        canvas_text(c, x + 120, gy, 1, C_DIM, "--");
     } else {
-        snprintf(volt_val, sizeof(volt_val), "%.3f", g->voltage_mv / 1000.0);
-        volt_w = value_unit_px(app, volt_val, "V");
+        snprintf(value, sizeof(value), "%.3f", g->voltage_mv / 1000.0);
+        canvas_value_unit(c, x + 120, gy, value, "V");
     }
-    int lim_left = 42 + lim_w;
-    int volt_left = 120 + volt_w;
-    rx = centered_x(x, w, lim_left > volt_left ? lim_left : volt_left);
-    canvas_text(c, rx, gy, 1, C_DIM, "LIM");
-    if (g->power_limit_w > 0.0)
-        canvas_value_unit(c, rx + 42, gy, lim_val, "W");
-    else
-        canvas_text(c, rx + 42, gy, 1, C_DIM, "--");
-    if (g->voltage_mv < 0)
-        canvas_text(c, rx + 120, gy, 1, C_DIM, "--");
-    else
-        canvas_value_unit(c, rx + 120, gy, volt_val, "V");
     gy += line;
 
-    char clk_val[32];
-    char max_val[32];
-    int clk_w, max_w;
-    int vmax = g->rp0_mhz >= 0 ? g->rp0_mhz : g->max_mhz;
+    canvas_text(c, x, gy, 1, C_DIM, "CLK");
     if (g->act_mhz < 0) {
-        snprintf(clk_val, sizeof(clk_val), "--");
-        clk_w = text_px(app, clk_val, 1.0f);
+        canvas_text(c, x + 42, gy, 1, C_DIM, "--");
     } else {
-        snprintf(clk_val, sizeof(clk_val), "%.2f", g->act_mhz / 1000.0);
-        clk_w = value_unit_px(app, clk_val, "GHz");
-    }
-    if (vmax < 0) {
-        snprintf(max_val, sizeof(max_val), "--");
-        max_w = text_px(app, max_val, 1.0f);
-    } else {
-        snprintf(max_val, sizeof(max_val), "%.2f", vmax / 1000.0);
-        max_w = value_unit_px(app, max_val, "GHz");
-    }
-    int clk_left = 42 + clk_w;
-    int max_left = 156 + max_w;
-    rx = centered_x(x, w, clk_left > max_left ? clk_left : max_left);
-    canvas_text(c, rx, gy, 1, C_DIM, "CLK");
-    if (g->act_mhz < 0)
-        canvas_text(c, rx + 42, gy, 1, C_DIM, "--");
-    else
-        canvas_value_unit(c, rx + 42, gy, clk_val, "GHz");
-    canvas_text(c, rx + 120, gy, 1, C_DIM, "MAX");
-    if (vmax < 0)
-        canvas_text(c, rx + 156, gy, 1, C_DIM, "--");
-    else
-        canvas_value_unit(c, rx + 156, gy, max_val, "GHz");
-    gy += line;
-
-    char req_val[32];
-    char rc6_val[32];
-    int req_w, rc6_w;
-    if (g->req_mhz < 0) {
-        snprintf(req_val, sizeof(req_val), "--");
-        req_w = text_px(app, req_val, 1.0f);
-    } else {
-        snprintf(req_val, sizeof(req_val), "%.2f", g->req_mhz / 1000.0);
-        req_w = value_unit_px(app, req_val, "GHz");
-    }
-    if (isnan(g->rc6_pct)) {
-        snprintf(rc6_val, sizeof(rc6_val), "--");
-        rc6_w = text_px(app, rc6_val, 1.0f);
-    } else {
-        snprintf(rc6_val, sizeof(rc6_val), "%.0f", g->rc6_pct);
-        rc6_w = value_unit_px(app, rc6_val, "%");
-    }
-    int req_left = 42 + req_w;
-    int rc6_left = 156 + rc6_w;
-    rx = centered_x(x, w, req_left > rc6_left ? req_left : rc6_left);
-    canvas_text(c, rx, gy, 1, C_DIM, "REQ");
-    if (g->req_mhz < 0)
-        canvas_text(c, rx + 42, gy, 1, C_DIM, "--");
-    else
-        canvas_value_unit(c, rx + 42, gy, req_val, "GHz");
-    canvas_text(c, rx + 120, gy, 1, C_DIM, "RC6");
-    if (isnan(g->rc6_pct))
-        canvas_text(c, rx + 156, gy, 1, C_DIM, "--");
-    else
-        canvas_value_unit(c, rx + 156, gy, rc6_val, "%");
-    gy += line;
-
-    char mem_val[32];
-    char tot_val[32];
-    int mem_w, tot_w, have_tot = 0;
-    if (!g->clients_scanned) {
-        snprintf(mem_val, sizeof(mem_val), "--");
-        mem_w = text_px(app, mem_val, 1.0f);
-    } else {
-        double used_gib = (double)g->mem_resident_bytes / (1024.0 * 1024.0 * 1024.0);
-        snprintf(mem_val, sizeof(mem_val), "%.2f", used_gib);
-        mem_w = value_unit_px(app, mem_val, "G");
-        if (g->mem_total_bytes > 0) {
-            double total_gib = (double)g->mem_total_bytes / (1024.0 * 1024.0 * 1024.0);
-            snprintf(tot_val, sizeof(tot_val), "%.1f", total_gib);
-            tot_w = value_unit_px(app, tot_val, "G");
-            have_tot = 1;
+        int vmax = g->rp0_mhz >= 0 ? g->rp0_mhz : g->max_mhz;
+        snprintf(value, sizeof(value), "%.2f", g->act_mhz / 1000.0);
+        canvas_value_unit(c, x + 42, gy, value, "GHz");
+        canvas_text(c, x + 120, gy, 1, C_DIM, "MAX");
+        if (vmax >= 0) {
+            snprintf(value, sizeof(value), "%.2f", vmax / 1000.0);
+            canvas_value_unit(c, x + 156, gy, value, "GHz");
+        } else {
+            canvas_text(c, x + 156, gy, 1, C_DIM, "--");
         }
     }
-    int mem_left = 42 + mem_w;
-    int tot_left = have_tot ? 156 + tot_w : 0;
-    rx = centered_x(x, w, mem_left > tot_left ? mem_left : tot_left);
-    canvas_text(c, rx, gy, 1, C_DIM, "MEM");
-    if (g->clients_scanned)
-        canvas_value_unit(c, rx + 42, gy, mem_val, "G");
-    else
-        canvas_text(c, rx + 42, gy, 1, C_DIM, "--");
-    if (have_tot) {
-        canvas_text(c, rx + 120, gy, 1, C_DIM, "TOT");
-        canvas_value_unit(c, rx + 156, gy, tot_val, "G");
-    }
     gy += line;
 
-    char fan_val[32];
-    int fan_w;
-    if (g->fan_rpm < 0) {
-        snprintf(fan_val, sizeof(fan_val), "--");
-        fan_w = text_px(app, fan_val, 1.0f);
+    canvas_text(c, x, gy, 1, C_DIM, "REQ");
+    if (g->req_mhz < 0) {
+        canvas_text(c, x + 42, gy, 1, C_DIM, "--");
     } else {
-        snprintf(fan_val, sizeof(fan_val), "%d", g->fan_rpm);
-        fan_w = value_unit_px(app, fan_val, "RPM");
+        snprintf(value, sizeof(value), "%.2f", g->req_mhz / 1000.0);
+        canvas_value_unit(c, x + 42, gy, value, "GHz");
     }
-    rx = centered_x(x, w, 42 + fan_w);
-    canvas_text(c, rx, gy, 1, C_DIM, "FAN");
-    if (g->fan_rpm < 0)
-        canvas_text(c, rx + 42, gy, 1, C_DIM, "--");
-    else
-        canvas_value_unit(c, rx + 42, gy, fan_val, "RPM");
+    canvas_text(c, x + 120, gy, 1, C_DIM, "RC6");
+    if (isnan(g->rc6_pct)) {
+        canvas_text(c, x + 156, gy, 1, C_DIM, "--");
+    } else {
+        snprintf(value, sizeof(value), "%.0f", g->rc6_pct);
+        canvas_value_unit(c, x + 156, gy, value, "%");
+    }
     gy += line;
 
-    char drv_val[32];
+    canvas_text(c, x, gy, 1, C_DIM, "MEM");
+    if (g->clients_scanned) {
+        double used_gib = (double)g->mem_resident_bytes / (1024.0 * 1024.0 * 1024.0);
+        snprintf(value, sizeof(value), "%.2f", used_gib);
+        canvas_value_unit(c, x + 42, gy, value, "G");
+        if (g->mem_total_bytes > 0) {
+            double total_gib = (double)g->mem_total_bytes / (1024.0 * 1024.0 * 1024.0);
+            canvas_text(c, x + 120, gy, 1, C_DIM, "TOT");
+            snprintf(value, sizeof(value), "%.1f", total_gib);
+            canvas_value_unit(c, x + 156, gy, value, "G");
+        }
+    } else {
+        canvas_text(c, x + 42, gy, 1, C_DIM, "--");
+    }
+    gy += line;
+
+    canvas_text(c, x, gy, 1, C_DIM, "FAN");
+    if (g->fan_rpm < 0) {
+        canvas_text(c, x + 42, gy, 1, C_DIM, "--");
+    } else {
+        snprintf(value, sizeof(value), "%d", g->fan_rpm);
+        canvas_value_unit(c, x + 42, gy, value, "RPM");
+    }
+    gy += line;
+
+    canvas_text(c, x, gy, 1, C_DIM, "DRV");
     if (!g->drv[0])
-        snprintf(drv_val, sizeof(drv_val), "--");
+        canvas_text(c, x + 42, gy, 1, C_DIM, "--");
     else
-        snprintf(drv_val, sizeof(drv_val), "%.12s", g->drv);
-    rx = centered_x(x, w, 42 + text_px(app, drv_val, 1.0f));
-    canvas_text(c, rx, gy, 1, C_DIM, "DRV");
-    canvas_textf(c, rx + 42, gy, 1, !g->drv[0] ? C_DIM : C_TEXT, "%s", drv_val);
+        canvas_textf(c, x + 42, gy, 1, C_TEXT, "%.12s", g->drv);
     gy += line;
 
-    if (g->throttled) {
-        char thr[64];
-        snprintf(thr, sizeof(thr), "THR %.22s", g->throttle);
-        rx = centered_x(x, w, text_px(app, thr, 1.0f));
-        canvas_textf(c, rx, gy, 1, C_RED, "%s", thr);
-    }
+    if (g->throttled)
+        canvas_textf(c, x, gy, 1, C_RED, "THR %.22s", g->throttle);
 }
 
 static void draw_footer(App *app, int x, int w, int H, int pad)
@@ -2027,6 +1951,44 @@ static void draw_scene(App *app)
     draw_footer(app, x, W - 2 * pad, H, pad);
 }
 
+static int hit_contains(const HitRect *r, int px, int py)
+{
+    return px >= r->x0 && px <= r->x1 && py >= r->y0 && py <= r->y1;
+}
+
+static int point_on_clickable(const App *app, int px, int py)
+{
+    for (int i = 0; i < app->tab_hit_count; i++)
+        if (hit_contains(&app->tab_hits[i], px, py))
+            return 1;
+    for (int i = 0; i < app->metric_hit_count; i++)
+        if (hit_contains(&app->metric_hits[i], px, py))
+            return 1;
+    for (int i = 0; i < app->range_toggle_count; i++)
+        if (hit_contains(&app->range_toggle_hits[i], px, py))
+            return 1;
+    if (app->range_open)
+        for (int i = 0; i < app->range_hit_count; i++)
+            if (hit_contains(&app->range_hits[i], px, py))
+                return 1;
+    return 0;
+}
+
+static void update_cursor(App *app, int px, int py)
+{
+    if (!app->have_hand_cursor)
+        return;
+    int on = point_on_clickable(app, px, py);
+    if (on == app->cursor_hand_on)
+        return;
+    app->cursor_hand_on = on;
+    if (on)
+        XDefineCursor(app->dpy, app->win, app->hand_cursor);
+    else
+        XUndefineCursor(app->dpy, app->win);
+    XFlush(app->dpy);
+}
+
 static int parse_primary_output(const char *want, int *ox, int *oy, int *ow, int *oh)
 {
     FILE *p = popen("xrandr --current 2>/dev/null", "r");
@@ -2204,10 +2166,13 @@ static void x11_open(App *app)
     attrs.override_redirect = app->opt.managed ? False : True;
     attrs.event_mask = ExposureMask | StructureNotifyMask | KeyPressMask |
                        EnterWindowMask | LeaveWindowMask;
-    if (!app->opt.click_through || app->opt.draggable)
-        attrs.event_mask |= ButtonPressMask;
+    if (!app->opt.click_through) {
+        attrs.event_mask |= ButtonPressMask | PointerMotionMask;
+        app->hand_cursor = XCreateFontCursor(app->dpy, XC_hand2);
+        app->have_hand_cursor = app->hand_cursor != 0;
+    }
     if (app->opt.draggable)
-        attrs.event_mask |= ButtonReleaseMask | PointerMotionMask;
+        attrs.event_mask |= ButtonReleaseMask;
 
     app->win = XCreateWindow(app->dpy, app->root, x, y, (unsigned)w, (unsigned)h, 0,
                              app->depth, InputOutput, app->visual,
@@ -3287,6 +3252,8 @@ static void app_destroy(App *app)
 {
     vulkan_destroy(app);
     if (app->dpy) {
+        if (app->have_hand_cursor)
+            XFreeCursor(app->dpy, app->hand_cursor);
         if (app->win)
             XDestroyWindow(app->dpy, app->win);
         if (app->cmap)
@@ -3455,11 +3422,13 @@ int main(int argc, char **argv)
             if (ev.type == Expose) {
                 dirty = 1;
             } else if (ev.type == EnterNotify) {
+                update_cursor(&app, ev.xcrossing.x, ev.xcrossing.y);
                 if (!app.hovered) {
                     app.hovered = 1;
                     dirty = 1;
                 }
             } else if (ev.type == LeaveNotify) {
+                update_cursor(&app, -1, -1);
                 if (app.hovered) {
                     app.hovered = 0;
                     dirty = 1;
@@ -3557,6 +3526,7 @@ int main(int argc, char **argv)
                     }
                 }
             } else if (ev.type == MotionNotify) {
+                update_cursor(&app, ev.xmotion.x, ev.xmotion.y);
                 if (app.dragging) {
                     int nx = app.drag_win_x + (ev.xmotion.x_root - app.drag_root_x);
                     int ny = app.drag_win_y + (ev.xmotion.y_root - app.drag_root_y);
