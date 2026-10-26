@@ -233,7 +233,13 @@ typedef struct {
     Visual *visual;
     int x, y, w, h;
     int hidden;
+    int hovered;
     int dragging;
+    int compact;
+    int expanded_h;
+    unsigned long last_click_time;
+    int last_click_x, last_click_y;
+    int have_last_click;
     int tab;
     int graph_metric;
     int graph_range;
@@ -1485,6 +1491,22 @@ static void draw_range_dropdown(App *app, Gpu *g, int x, int y)
     }
 }
 
+static int text_px(const App *app, const char *s, float scale)
+{
+    return (int)((float)strlen(s) * (float)app->font.advance * scale + 0.5f);
+}
+
+static int value_unit_px(const App *app, const char *value, const char *unit)
+{
+    return text_px(app, value, 1.0f) + text_px(app, unit, 0.75f);
+}
+
+static int centered_x(int x, int w, int content_w)
+{
+    int cx = x + (w - content_w) / 2;
+    return cx < x ? x : cx;
+}
+
 static void draw_gpu_block(App *app, Gpu *g, int x, int y, int w, int h)
 {
     Canvas *c = &app->canvas;
@@ -1493,26 +1515,28 @@ static void draw_gpu_block(App *app, Gpu *g, int x, int y, int w, int h)
     int line = f->glyph_h + 8;
     int gy = y;
     double power_max = g->power_limit_w > 0.0 ? g->power_limit_w : 200.0;
-    int colw = w / 4;
 
-    canvas_textf(c, x, gy, 3, C_ACCENT, "GPU%d", g->index);
     char model[64];
-    canvas_textf(c, x + 136, gy + 6, 1, C_ACCENT, "%s",
-                 model_short(g->model, model, sizeof(model)));
-    if (g->pcie_gen > 0 && g->pcie_width > 0)
-        canvas_textf(c, x + 136, gy + 32, 1, C_DIM, "Gen%d x%d",
-                     g->pcie_gen, g->pcie_width);
+    char gen[32];
+    char gpu_label[32];
+    model_short(g->model, model, sizeof(model));
+    snprintf(gpu_label, sizeof(gpu_label), "GPU%d", g->index);
+    int has_gen = g->pcie_gen > 0 && g->pcie_width > 0;
+    if (has_gen)
+        snprintf(gen, sizeof(gen), "Gen%d x%d", g->pcie_gen, g->pcie_width);
+    int gl = text_px(app, gpu_label, 3.0f);
+    int mw = text_px(app, model, 1.0f);
+    int gw = has_gen ? text_px(app, gen, 1.0f) : 0;
+    int bw = mw > gw ? mw : gw;
+    int hx = centered_x(x, w, gl + 14 + bw);
+    canvas_text(c, hx, gy, 3, C_ACCENT, gpu_label);
+    canvas_textf(c, hx + gl + 14, gy + 6, 1, C_ACCENT, "%s", model);
+    if (has_gen)
+        canvas_textf(c, hx + gl + 14, gy + 32, 1, C_DIM, "%s", gen);
     gy += 66;
 
     static const char *top_labels[TOP_METRICS] = {"PWR", "TMP", "ENG", "MEM"};
     static const char *top_units[TOP_METRICS] = {"W", "C", "%", "%"};
-    int top_y = gy;
-    for (int i = 0; i < TOP_METRICS; i++) {
-        Color label_col = app->graph_metric == i ? C_ACCENT : C_DIM;
-        canvas_text(c, x + i * colw, top_y, 1, label_col, top_labels[i]);
-    }
-    gy += line;
-
     double values[TOP_METRICS];
     double limits[TOP_METRICS];
     values[0] = g->power_w;
@@ -1524,21 +1548,50 @@ static void draw_gpu_block(App *app, Gpu *g, int x, int y, int w, int h)
     limits[2] = 100.0;
     limits[3] = 100.0;
 
+    int slot_w[TOP_METRICS];
+    int label_w[TOP_METRICS];
+    int val_w[TOP_METRICS];
+    char val_str[TOP_METRICS][32];
+    int total_w = 0;
     for (int i = 0; i < TOP_METRICS; i++) {
-        int vx = x + i * colw;
+        label_w[i] = text_px(app, top_labels[i], 1.0f);
+        if (isnan(values[i])) {
+            snprintf(val_str[i], sizeof(val_str[i]), "--");
+            val_w[i] = text_px(app, "--", 1.0f);
+        } else {
+            snprintf(val_str[i], sizeof(val_str[i]), "%.0f", values[i]);
+            val_w[i] = value_unit_px(app, val_str[i], top_units[i]);
+        }
+        slot_w[i] = label_w[i] > val_w[i] ? label_w[i] : val_w[i];
+        total_w += slot_w[i];
+    }
+    int slot_gap = 14;
+    total_w += slot_gap * (TOP_METRICS - 1);
+    int mx = centered_x(x, w, total_w);
+    int top_y = gy;
+    int slot_x[TOP_METRICS];
+    for (int i = 0; i < TOP_METRICS; i++) {
+        slot_x[i] = mx;
+        Color label_col = app->graph_metric == i ? C_ACCENT : C_DIM;
+        int lx = slot_x[i] + (slot_w[i] - label_w[i]) / 2;
+        canvas_text(c, lx, top_y, 1, label_col, top_labels[i]);
+        mx += slot_w[i] + slot_gap;
+    }
+    gy += line;
+
+    for (int i = 0; i < TOP_METRICS; i++) {
+        int vx = slot_x[i] + (slot_w[i] - val_w[i]) / 2;
         if (isnan(values[i])) {
             canvas_text(c, vx, gy, 1, C_DIM, "--");
         } else {
-            char value[32];
-            snprintf(value, sizeof(value), "%.0f", values[i]);
             Color col = ramp_color(values[i], limits[i]);
-            canvas_value_unit_colored(c, vx, gy, value, top_units[i], col, col);
+            canvas_value_unit_colored(c, vx, gy, val_str[i], top_units[i], col, col);
         }
         if (app->metric_hit_count < MAX_CARDS * TOP_METRICS) {
             HitRect *hit = &app->metric_hits[app->metric_hit_count];
-            hit->x0 = vx - 2;
+            hit->x0 = slot_x[i] - 2;
             hit->y0 = top_y - 2;
-            hit->x1 = vx + colw - 6;
+            hit->x1 = slot_x[i] + slot_w[i] + 2;
             hit->y1 = gy + f->glyph_h + 2;
             app->metric_hit_metrics[app->metric_hit_count] = i;
             app->metric_hit_count++;
@@ -1549,8 +1602,13 @@ static void draw_gpu_block(App *app, Gpu *g, int x, int y, int w, int h)
     canvas_rect(c, x, (float)gy, (float)w, 1.0f, C_LINE);
     gy += 5;
 
-    int tab_x[2] = {x, x + 105};
     static const char *tab_names[2] = {"GRAPH", "DETAILS"};
+    int tw0 = text_px(app, tab_names[0], 1.0f);
+    int tw1 = text_px(app, tab_names[1], 1.0f);
+    int tab_gap = 32;
+    int tab_x[2];
+    tab_x[0] = centered_x(x, w, tw0 + tab_gap + tw1);
+    tab_x[1] = tab_x[0] + tw0 + tab_gap;
     for (int i = 0; i < 2; i++) {
         canvas_text(c, tab_x[i], gy, 1, tab == i ? C_ACCENT : C_DIM, tab_names[i]);
         if (tab == i)
@@ -1599,95 +1657,337 @@ static void draw_gpu_block(App *app, Gpu *g, int x, int y, int w, int h)
         return;
     }
 
-    char value[32];
-    canvas_text(c, x, gy, 1, C_DIM, "LIM");
+    int rx;
+
+    char lim_val[32];
+    int lim_w;
     if (g->power_limit_w > 0.0) {
-        snprintf(value, sizeof(value), "%.0f", g->power_limit_w);
-        canvas_value_unit(c, x + 42, gy, value, "W");
+        snprintf(lim_val, sizeof(lim_val), "%.0f", g->power_limit_w);
+        lim_w = value_unit_px(app, lim_val, "W");
     } else {
-        canvas_text(c, x + 42, gy, 1, C_DIM, "--");
+        snprintf(lim_val, sizeof(lim_val), "--");
+        lim_w = text_px(app, lim_val, 1.0f);
     }
+    char volt_val[32];
+    int volt_w;
     if (g->voltage_mv < 0) {
-        canvas_text(c, x + 120, gy, 1, C_DIM, "--");
+        snprintf(volt_val, sizeof(volt_val), "--");
+        volt_w = text_px(app, volt_val, 1.0f);
     } else {
-        snprintf(value, sizeof(value), "%.3f", g->voltage_mv / 1000.0);
-        canvas_value_unit(c, x + 120, gy, value, "V");
+        snprintf(volt_val, sizeof(volt_val), "%.3f", g->voltage_mv / 1000.0);
+        volt_w = value_unit_px(app, volt_val, "V");
     }
+    int lim_left = 42 + lim_w;
+    int volt_left = 120 + volt_w;
+    rx = centered_x(x, w, lim_left > volt_left ? lim_left : volt_left);
+    canvas_text(c, rx, gy, 1, C_DIM, "LIM");
+    if (g->power_limit_w > 0.0)
+        canvas_value_unit(c, rx + 42, gy, lim_val, "W");
+    else
+        canvas_text(c, rx + 42, gy, 1, C_DIM, "--");
+    if (g->voltage_mv < 0)
+        canvas_text(c, rx + 120, gy, 1, C_DIM, "--");
+    else
+        canvas_value_unit(c, rx + 120, gy, volt_val, "V");
     gy += line;
 
-    canvas_text(c, x, gy, 1, C_DIM, "CLK");
+    char clk_val[32];
+    char max_val[32];
+    int clk_w, max_w;
+    int vmax = g->rp0_mhz >= 0 ? g->rp0_mhz : g->max_mhz;
     if (g->act_mhz < 0) {
-        canvas_text(c, x + 42, gy, 1, C_DIM, "--");
+        snprintf(clk_val, sizeof(clk_val), "--");
+        clk_w = text_px(app, clk_val, 1.0f);
     } else {
-        int vmax = g->rp0_mhz >= 0 ? g->rp0_mhz : g->max_mhz;
-        snprintf(value, sizeof(value), "%.2f", g->act_mhz / 1000.0);
-        canvas_value_unit(c, x + 42, gy, value, "GHz");
-        canvas_text(c, x + 120, gy, 1, C_DIM, "MAX");
-        if (vmax >= 0) {
-            snprintf(value, sizeof(value), "%.2f", vmax / 1000.0);
-            canvas_value_unit(c, x + 156, gy, value, "GHz");
-        } else {
-            canvas_text(c, x + 156, gy, 1, C_DIM, "--");
-        }
+        snprintf(clk_val, sizeof(clk_val), "%.2f", g->act_mhz / 1000.0);
+        clk_w = value_unit_px(app, clk_val, "GHz");
     }
+    if (vmax < 0) {
+        snprintf(max_val, sizeof(max_val), "--");
+        max_w = text_px(app, max_val, 1.0f);
+    } else {
+        snprintf(max_val, sizeof(max_val), "%.2f", vmax / 1000.0);
+        max_w = value_unit_px(app, max_val, "GHz");
+    }
+    int clk_left = 42 + clk_w;
+    int max_left = 156 + max_w;
+    rx = centered_x(x, w, clk_left > max_left ? clk_left : max_left);
+    canvas_text(c, rx, gy, 1, C_DIM, "CLK");
+    if (g->act_mhz < 0)
+        canvas_text(c, rx + 42, gy, 1, C_DIM, "--");
+    else
+        canvas_value_unit(c, rx + 42, gy, clk_val, "GHz");
+    canvas_text(c, rx + 120, gy, 1, C_DIM, "MAX");
+    if (vmax < 0)
+        canvas_text(c, rx + 156, gy, 1, C_DIM, "--");
+    else
+        canvas_value_unit(c, rx + 156, gy, max_val, "GHz");
     gy += line;
 
-    canvas_text(c, x, gy, 1, C_DIM, "REQ");
+    char req_val[32];
+    char rc6_val[32];
+    int req_w, rc6_w;
     if (g->req_mhz < 0) {
-        canvas_text(c, x + 42, gy, 1, C_DIM, "--");
+        snprintf(req_val, sizeof(req_val), "--");
+        req_w = text_px(app, req_val, 1.0f);
     } else {
-        snprintf(value, sizeof(value), "%.2f", g->req_mhz / 1000.0);
-        canvas_value_unit(c, x + 42, gy, value, "GHz");
+        snprintf(req_val, sizeof(req_val), "%.2f", g->req_mhz / 1000.0);
+        req_w = value_unit_px(app, req_val, "GHz");
     }
-    canvas_text(c, x + 120, gy, 1, C_DIM, "RC6");
     if (isnan(g->rc6_pct)) {
-        canvas_text(c, x + 156, gy, 1, C_DIM, "--");
+        snprintf(rc6_val, sizeof(rc6_val), "--");
+        rc6_w = text_px(app, rc6_val, 1.0f);
     } else {
-        snprintf(value, sizeof(value), "%.0f", g->rc6_pct);
-        canvas_value_unit(c, x + 156, gy, value, "%");
+        snprintf(rc6_val, sizeof(rc6_val), "%.0f", g->rc6_pct);
+        rc6_w = value_unit_px(app, rc6_val, "%");
     }
+    int req_left = 42 + req_w;
+    int rc6_left = 156 + rc6_w;
+    rx = centered_x(x, w, req_left > rc6_left ? req_left : rc6_left);
+    canvas_text(c, rx, gy, 1, C_DIM, "REQ");
+    if (g->req_mhz < 0)
+        canvas_text(c, rx + 42, gy, 1, C_DIM, "--");
+    else
+        canvas_value_unit(c, rx + 42, gy, req_val, "GHz");
+    canvas_text(c, rx + 120, gy, 1, C_DIM, "RC6");
+    if (isnan(g->rc6_pct))
+        canvas_text(c, rx + 156, gy, 1, C_DIM, "--");
+    else
+        canvas_value_unit(c, rx + 156, gy, rc6_val, "%");
     gy += line;
 
-    canvas_text(c, x, gy, 1, C_DIM, "MEM");
-    if (g->clients_scanned) {
+    char mem_val[32];
+    char tot_val[32];
+    int mem_w, tot_w, have_tot = 0;
+    if (!g->clients_scanned) {
+        snprintf(mem_val, sizeof(mem_val), "--");
+        mem_w = text_px(app, mem_val, 1.0f);
+    } else {
         double used_gib = (double)g->mem_resident_bytes / (1024.0 * 1024.0 * 1024.0);
-        snprintf(value, sizeof(value), "%.2f", used_gib);
-        canvas_value_unit(c, x + 42, gy, value, "G");
+        snprintf(mem_val, sizeof(mem_val), "%.2f", used_gib);
+        mem_w = value_unit_px(app, mem_val, "G");
         if (g->mem_total_bytes > 0) {
             double total_gib = (double)g->mem_total_bytes / (1024.0 * 1024.0 * 1024.0);
-            canvas_text(c, x + 120, gy, 1, C_DIM, "TOT");
-            snprintf(value, sizeof(value), "%.1f", total_gib);
-            canvas_value_unit(c, x + 156, gy, value, "G");
+            snprintf(tot_val, sizeof(tot_val), "%.1f", total_gib);
+            tot_w = value_unit_px(app, tot_val, "G");
+            have_tot = 1;
         }
-    } else {
-        canvas_text(c, x + 42, gy, 1, C_DIM, "--");
     }
-    gy += line;
-
-    canvas_text(c, x, gy, 1, C_DIM, "FAN");
-    if (g->fan_rpm < 0) {
-        canvas_text(c, x + 42, gy, 1, C_DIM, "--");
-    } else {
-        snprintf(value, sizeof(value), "%d", g->fan_rpm);
-        canvas_value_unit(c, x + 42, gy, value, "RPM");
-    }
-    gy += line;
-
-    canvas_text(c, x, gy, 1, C_DIM, "DRV");
-    if (!g->drv[0])
-        canvas_text(c, x + 42, gy, 1, C_DIM, "--");
+    int mem_left = 42 + mem_w;
+    int tot_left = have_tot ? 156 + tot_w : 0;
+    rx = centered_x(x, w, mem_left > tot_left ? mem_left : tot_left);
+    canvas_text(c, rx, gy, 1, C_DIM, "MEM");
+    if (g->clients_scanned)
+        canvas_value_unit(c, rx + 42, gy, mem_val, "G");
     else
-        canvas_textf(c, x + 42, gy, 1, C_TEXT, "%.12s", g->drv);
+        canvas_text(c, rx + 42, gy, 1, C_DIM, "--");
+    if (have_tot) {
+        canvas_text(c, rx + 120, gy, 1, C_DIM, "TOT");
+        canvas_value_unit(c, rx + 156, gy, tot_val, "G");
+    }
     gy += line;
 
-    if (g->throttled)
-        canvas_textf(c, x, gy, 1, C_RED, "THR %.22s", g->throttle);
+    char fan_val[32];
+    int fan_w;
+    if (g->fan_rpm < 0) {
+        snprintf(fan_val, sizeof(fan_val), "--");
+        fan_w = text_px(app, fan_val, 1.0f);
+    } else {
+        snprintf(fan_val, sizeof(fan_val), "%d", g->fan_rpm);
+        fan_w = value_unit_px(app, fan_val, "RPM");
+    }
+    rx = centered_x(x, w, 42 + fan_w);
+    canvas_text(c, rx, gy, 1, C_DIM, "FAN");
+    if (g->fan_rpm < 0)
+        canvas_text(c, rx + 42, gy, 1, C_DIM, "--");
+    else
+        canvas_value_unit(c, rx + 42, gy, fan_val, "RPM");
+    gy += line;
+
+    char drv_val[32];
+    if (!g->drv[0])
+        snprintf(drv_val, sizeof(drv_val), "--");
+    else
+        snprintf(drv_val, sizeof(drv_val), "%.12s", g->drv);
+    rx = centered_x(x, w, 42 + text_px(app, drv_val, 1.0f));
+    canvas_text(c, rx, gy, 1, C_DIM, "DRV");
+    canvas_textf(c, rx + 42, gy, 1, !g->drv[0] ? C_DIM : C_TEXT, "%s", drv_val);
+    gy += line;
+
+    if (g->throttled) {
+        char thr[64];
+        snprintf(thr, sizeof(thr), "THR %.22s", g->throttle);
+        rx = centered_x(x, w, text_px(app, thr, 1.0f));
+        canvas_textf(c, rx, gy, 1, C_RED, "%s", thr);
+    }
+}
+
+static void draw_footer(App *app, int x, int w, int H, int pad)
+{
+    Canvas *c = &app->canvas;
+    FontAtlas *f = &app->font;
+    int footer_h = 22;
+    double total = 0.0;
+    int have_total = 0;
+    uint64_t mem_used = 0;
+    uint64_t mem_capacity = 0;
+    int have_mem = 0;
+    for (int i = 0; i < app->ngpus; i++) {
+        if (!isnan(app->gpus[i].power_w)) {
+            total += app->gpus[i].power_w;
+            have_total = 1;
+        }
+        if (app->gpus[i].clients_scanned && app->gpus[i].mem_total_bytes > 0) {
+            mem_used += app->gpus[i].mem_resident_bytes;
+            mem_capacity += app->gpus[i].mem_total_bytes;
+            have_mem = 1;
+        }
+    }
+    int fy = H - pad - footer_h + 2;
+    canvas_rect(c, x, (float)fy, (float)w, 1.0f, C_LINE);
+    char footer[96];
+    Color footer_col = C_ACCENT;
+    if (have_total && have_mem) {
+        double used_gib = (double)mem_used / (1024.0 * 1024.0 * 1024.0);
+        double cap_gib = (double)mem_capacity / (1024.0 * 1024.0 * 1024.0);
+        snprintf(footer, sizeof(footer), "TOTAL %.0fW | %.0fG/%.0fG",
+                 total, used_gib, cap_gib);
+    } else if (have_total) {
+        snprintf(footer, sizeof(footer), "TOTAL %.0fW", total);
+    } else {
+        snprintf(footer, sizeof(footer), "TOTAL --");
+        footer_col = C_DIM;
+    }
+    int footer_x = (x + (w - (int)strlen(footer) * f->advance) / 2);
+    if (footer_x < 0)
+        footer_x = 0;
+    canvas_text(c, footer_x, fy + 4, 1, footer_col, footer);
+}
+
+static int compact_label_gap(const App *app)
+{
+    return (int)(app->font.glyph_h * 0.75f + 0.5f) + 2;
+}
+
+static int compact_height(const App *app)
+{
+    int row = app->font.glyph_h + 8;
+    int gap = compact_label_gap(app);
+    int rows = app->ngpus > 0 ? app->ngpus : 1;
+    return 12 + rows * (2 * row + gap + 2) + row + 6 + 22 + 12;
+}
+
+static void recreate_swapchain(App *app);
+
+static void set_compact(App *app, int compact)
+{
+    if (app->compact == compact)
+        return;
+    app->compact = compact;
+    int h;
+    if (compact) {
+        app->expanded_h = app->h;
+        h = compact_height(app);
+    } else {
+        h = app->expanded_h > 0 ? app->expanded_h : app->h;
+    }
+    if (h < 40)
+        h = 40;
+    app->h = h;
+    XResizeWindow(app->dpy, app->win, (unsigned)app->w, (unsigned)h);
+    XFlush(app->dpy);
+    recreate_swapchain(app);
+}
+
+static void draw_compact(App *app, int x, int y, int w, int H, int pad)
+{
+    Canvas *c = &app->canvas;
+    FontAtlas *f = &app->font;
+    int row = f->glyph_h + 8;
+    static const char *top_labels[TOP_METRICS] = {"PWR", "TMP", "ENG", "MEM"};
+    static const char *top_units[TOP_METRICS] = {"W", "C", "%", "%"};
+
+    for (int i = 0; i < app->ngpus; i++) {
+        Gpu *g = &app->gpus[i];
+        char model[64];
+        char title[128];
+        model_short(g->model, model, sizeof(model));
+        if (g->pcie_gen > 0 && g->pcie_width > 0)
+            snprintf(title, sizeof(title), "#%d %s Gen%d x%d",
+                     g->index, model, g->pcie_gen, g->pcie_width);
+        else
+            snprintf(title, sizeof(title), "#%d %s", g->index, model);
+        canvas_text(c, centered_x(x, w, text_px(app, title, 1.0f)), y,
+                    1, C_ACCENT, title);
+        y += row;
+
+        double power_max = g->power_limit_w > 0.0 ? g->power_limit_w : 200.0;
+        double values[TOP_METRICS];
+        double limits[TOP_METRICS];
+        values[0] = g->power_w;
+        values[1] = g->temp_c >= 0 ? (double)g->temp_c : NAN;
+        values[2] = g->engine_busy_pct;
+        values[3] = gpu_mem_pct(g);
+        limits[0] = power_max;
+        limits[1] = 100.0;
+        limits[2] = 100.0;
+        limits[3] = 100.0;
+
+        int slot_w[TOP_METRICS];
+        int label_w[TOP_METRICS];
+        int val_w[TOP_METRICS];
+        char val_str[TOP_METRICS][32];
+        int total_w = 0;
+        for (int m = 0; m < TOP_METRICS; m++) {
+            label_w[m] = text_px(app, top_labels[m], 0.75f);
+            if (isnan(values[m])) {
+                snprintf(val_str[m], sizeof(val_str[m]), "--");
+                val_w[m] = text_px(app, "--", 1.0f);
+            } else {
+                snprintf(val_str[m], sizeof(val_str[m]), "%.0f", values[m]);
+                val_w[m] = value_unit_px(app, val_str[m], top_units[m]);
+            }
+            slot_w[m] = label_w[m] > val_w[m] ? label_w[m] : val_w[m];
+            total_w += slot_w[m];
+        }
+        int slot_gap = 12;
+        total_w += slot_gap * (TOP_METRICS - 1);
+        int mx = centered_x(x, w, total_w);
+        int slot_x[TOP_METRICS];
+        for (int m = 0; m < TOP_METRICS; m++) {
+            slot_x[m] = mx;
+            Color label_col = app->graph_metric == m ? C_ACCENT : C_DIM;
+            int lx = slot_x[m] + (slot_w[m] - label_w[m]) / 2;
+            canvas_text_scaled(c, lx, y, 0.75f, label_col, top_labels[m]);
+            mx += slot_w[m] + slot_gap;
+        }
+        y += compact_label_gap(app);
+        for (int m = 0; m < TOP_METRICS; m++) {
+            int vx = slot_x[m] + (slot_w[m] - val_w[m]) / 2;
+            if (isnan(values[m])) {
+                canvas_text(c, vx, y, 1, C_DIM, "--");
+            } else {
+                Color col = ramp_color(values[m], limits[m]);
+                canvas_value_unit_colored(c, vx, y, val_str[m], top_units[m], col, col);
+            }
+        }
+        y += row + 2;
+    }
+    if (app->ngpus == 0) {
+        canvas_text(c, x, y, 1, C_RED, "NO GPU TELEMETRY");
+        y += row;
+    }
+    if (app->hovered) {
+        const char *hint = "Double-click for details.";
+        canvas_text_scaled(c, centered_x(x, w, text_px(app, hint, 0.75f)), y,
+                           0.75f, C_DIM, hint);
+    }
+    draw_footer(app, x, w, H, pad);
 }
 
 static void draw_scene(App *app)
 {
     Canvas *c = &app->canvas;
-    FontAtlas *f = &app->font;
     canvas_reset(c);
     app->tab_hit_count = 0;
     app->metric_hit_count = 0;
@@ -1706,6 +2006,11 @@ static void draw_scene(App *app)
     int x = pad;
     int y = pad;
 
+    if (app->compact) {
+        draw_compact(app, x, y, W - 2 * pad, H, pad);
+        return;
+    }
+
     int footer_h = 22;
     int avail = H - y - pad - footer_h;
     int block_h = app->ngpus > 0 ? avail / app->ngpus : avail;
@@ -1719,41 +2024,7 @@ static void draw_scene(App *app)
     if (app->ngpus == 0)
         canvas_text(c, x, y, 1, C_RED, "NO GPU TELEMETRY");
 
-    double total = 0.0;
-    int have_total = 0;
-    uint64_t mem_used = 0;
-    uint64_t mem_capacity = 0;
-    int have_mem = 0;
-    for (int i = 0; i < app->ngpus; i++) {
-        if (!isnan(app->gpus[i].power_w)) {
-            total += app->gpus[i].power_w;
-            have_total = 1;
-        }
-        if (app->gpus[i].clients_scanned && app->gpus[i].mem_total_bytes > 0) {
-            mem_used += app->gpus[i].mem_resident_bytes;
-            mem_capacity += app->gpus[i].mem_total_bytes;
-            have_mem = 1;
-        }
-    }
-    int fy = H - pad - footer_h + 2;
-    canvas_rect(c, x, (float)fy, (float)(W - 2 * pad), 1.0f, C_LINE);
-    char footer[96];
-    Color footer_col = C_ACCENT;
-    if (have_total && have_mem) {
-        double used_gib = (double)mem_used / (1024.0 * 1024.0 * 1024.0);
-        double cap_gib = (double)mem_capacity / (1024.0 * 1024.0 * 1024.0);
-        snprintf(footer, sizeof(footer), "TOTAL %.0fW | %.0fG/%.0fG",
-                 total, used_gib, cap_gib);
-    } else if (have_total) {
-        snprintf(footer, sizeof(footer), "TOTAL %.0fW", total);
-    } else {
-        snprintf(footer, sizeof(footer), "TOTAL --");
-        footer_col = C_DIM;
-    }
-    int footer_x = (W - (int)strlen(footer) * f->advance) / 2;
-    if (footer_x < 0)
-        footer_x = 0;
-    canvas_text(c, footer_x, fy + 4, 1, footer_col, footer);
+    draw_footer(app, x, W - 2 * pad, H, pad);
 }
 
 static int parse_primary_output(const char *want, int *ox, int *oy, int *ow, int *oh)
@@ -1931,7 +2202,8 @@ static void x11_open(App *app)
     attrs.border_pixel = 0;
     attrs.colormap = app->cmap;
     attrs.override_redirect = app->opt.managed ? False : True;
-    attrs.event_mask = ExposureMask | StructureNotifyMask | KeyPressMask;
+    attrs.event_mask = ExposureMask | StructureNotifyMask | KeyPressMask |
+                       EnterWindowMask | LeaveWindowMask;
     if (!app->opt.click_through || app->opt.draggable)
         attrs.event_mask |= ButtonPressMask;
     if (app->opt.draggable)
@@ -2321,19 +2593,17 @@ static void create_swapchain(App *app)
         fprintf(stderr, "gpu_overlay: surface supports opaque alpha only\n");
     }
 
-    VkExtent2D extent = caps.currentExtent;
-    if (extent.width == UINT32_MAX) {
-        extent.width = (uint32_t)app->w;
-        extent.height = (uint32_t)app->h;
-        if (extent.width < caps.minImageExtent.width)
-            extent.width = caps.minImageExtent.width;
-        if (extent.width > caps.maxImageExtent.width)
-            extent.width = caps.maxImageExtent.width;
-        if (extent.height < caps.minImageExtent.height)
-            extent.height = caps.minImageExtent.height;
-        if (extent.height > caps.maxImageExtent.height)
-            extent.height = caps.maxImageExtent.height;
-    }
+    VkExtent2D extent;
+    extent.width = (uint32_t)app->w;
+    extent.height = (uint32_t)app->h;
+    if (extent.width < caps.minImageExtent.width)
+        extent.width = caps.minImageExtent.width;
+    if (extent.width > caps.maxImageExtent.width)
+        extent.width = caps.maxImageExtent.width;
+    if (extent.height < caps.minImageExtent.height)
+        extent.height = caps.minImageExtent.height;
+    if (extent.height > caps.maxImageExtent.height)
+        extent.height = caps.maxImageExtent.height;
     if (extent.width == 0 || extent.height == 0)
         die("zero-sized surface");
     v->extent = extent;
@@ -3043,7 +3313,8 @@ static void usage(const char *argv0)
     printf("  --managed            let the window manager manage the window\n");
     printf("  --draggable          drag the window with the left mouse button\n");
     printf("  --help               this text\n");
-    printf("\n  SIGUSR1 toggles visibility; click tabs; Tab switches views; Ctrl-C quits.\n");
+    printf("\n  SIGUSR1 toggles visibility; click tabs; Tab switches views;\n");
+    printf("  double-click toggles compact mode; Ctrl-C quits.\n");
 }
 
 enum {
@@ -3183,8 +3454,34 @@ int main(int argc, char **argv)
             XNextEvent(app.dpy, &ev);
             if (ev.type == Expose) {
                 dirty = 1;
+            } else if (ev.type == EnterNotify) {
+                if (!app.hovered) {
+                    app.hovered = 1;
+                    dirty = 1;
+                }
+            } else if (ev.type == LeaveNotify) {
+                if (app.hovered) {
+                    app.hovered = 0;
+                    dirty = 1;
+                }
             } else if (ev.type == ButtonPress) {
                 if (ev.xbutton.button == Button1) {
+                    int dbl = app.have_last_click &&
+                              ev.xbutton.time - app.last_click_time <= 300 &&
+                              abs(ev.xbutton.x - app.last_click_x) <= 4 &&
+                              abs(ev.xbutton.y - app.last_click_y) <= 4;
+                    app.have_last_click = 0;
+                    if (dbl) {
+                        set_compact(&app, !app.compact);
+                        app.range_open = 0;
+                        dirty = 1;
+                        continue;
+                    }
+                    app.have_last_click = 1;
+                    app.last_click_time = ev.xbutton.time;
+                    app.last_click_x = ev.xbutton.x;
+                    app.last_click_y = ev.xbutton.y;
+
                     int handled = 0;
                     for (int i = 0; i < app.tab_hit_count; i++) {
                         HitRect *r = &app.tab_hits[i];

@@ -1,6 +1,10 @@
 ROOT ?= $(abspath ../..)
 OUT ?= $(ROOT)/work
 BIN := $(OUT)/gpu_overlay
+PREFIX ?= /usr/local
+BINDIR ?= $(PREFIX)/bin
+DESTDIR ?=
+RUN_ARGS ?= --draggable
 
 VK_INC ?= $(ROOT)/work/vulkan-headers/include
 X11_INC ?= $(ROOT)/work/deps/x11/usr/include
@@ -18,7 +22,9 @@ CPPFLAGS += -I$(VK_INC) -I$(X11_INC) -I$(OUT)
 LDFLAGS += -B/usr/bin
 LDLIBS += $(VULKAN_LIB) $(X11_LIB) -ldl -lm -lpthread
 
-all: $(BIN)
+all: build
+
+build: $(BIN)
 
 $(OUT):
 	mkdir -p $(OUT)
@@ -32,7 +38,21 @@ $(OUT)/overlay_frag.h: overlay.frag | $(OUT)
 $(BIN): gpu_overlay.c $(OUT)/overlay_vert.h $(OUT)/overlay_frag.h Makefile | $(OUT)
 	$(CC) $(CFLAGS) $(CPPFLAGS) $(LDFLAGS) -o $@ gpu_overlay.c $(LDLIBS)
 
+install: $(BIN)
+	install -d $(DESTDIR)$(BINDIR)
+	install -m755 $(BIN) $(DESTDIR)$(BINDIR)/gpu_overlay
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/gpu_overlay
+
+deploy: $(BIN)
+	install -d $(HOME)/.local/bin
+	install -m755 $(BIN) $(HOME)/.local/bin/gpu_overlay
+
+run: $(BIN)
+	$(BIN) $(RUN_ARGS)
+
 clean:
 	rm -f $(BIN) $(OUT)/overlay_vert.h $(OUT)/overlay_frag.h
 
-.PHONY: all clean
+.PHONY: all build install uninstall deploy run clean
