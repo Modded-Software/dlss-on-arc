@@ -52,7 +52,10 @@ deploy: $(BIN)
 run: $(BIN)
 	$(BIN) $(RUN_ARGS)
 
+run-system: $(BIN)
+	$(BIN) --system $(RUN_ARGS)
+
 clean:
 	rm -f $(BIN) $(OUT)/overlay_vert.h $(OUT)/overlay_frag.h
 
-.PHONY: all build install uninstall deploy run clean
+.PHONY: all build install uninstall deploy run run-system clean

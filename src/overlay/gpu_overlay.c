@@ -144,6 +144,50 @@ typedef struct {
 } Gpu;
 
 typedef struct {
+    char model[96];
+    char vendor[32];
+    int family, model_id, stepping;
+    char microcode[32];
+    int cores, threads, sockets;
+    double base_mhz, min_mhz, max_mhz, cur_mhz, avg_mhz;
+    char governor[32];
+    char scaling_driver[32];
+    char epp[48];
+    int l1d_kb, l1i_kb, l2_kb, l3_kb;
+    int numa_nodes;
+    double load_pct;
+    double load1, load5, load15;
+    int temp_c;
+    int temp_valid;
+    double power_w;
+    int power_valid;
+    double pl1_w, pl2_w;
+    unsigned long long prev_total, prev_idle;
+    int prev_valid;
+    unsigned long long last_energy_uj;
+    double last_energy_time;
+    double hist[TOP_METRICS][HISTORY];
+    double last_hist_time;
+} SysCpu;
+
+typedef struct {
+    uint64_t total_kb, free_kb, avail_kb, buffers_kb, cached_kb;
+    uint64_t active_kb, inactive_kb, dirty_kb, writeback_kb, shmem_kb;
+    uint64_t slab_kb, sreclaim_kb, sunreclaim_kb, kstack_kb, pagetables_kb;
+    uint64_t swap_total_kb, swap_free_kb;
+    double used_pct, swap_pct;
+    double dimm_temp[8];
+    int ndimms;
+    double hist[TOP_METRICS][HISTORY];
+    double last_hist_time;
+} SysMem;
+
+typedef struct {
+    SysCpu cpu;
+    SysMem mem;
+} SysInfo;
+
+typedef struct {
     unsigned char *pixels;
     int w, h;
     int cell_w, cell_h;
@@ -170,6 +214,7 @@ typedef struct {
     int probe;
     int json;
     int selftest;
+    int system;
 } Options;
 
 typedef struct {
@@ -222,6 +267,8 @@ typedef struct {
 typedef struct {
     Gpu gpus[MAX_CARDS];
     int ngpus;
+    SysInfo sys;
+    int system_mode;
     Options opt;
     FontAtlas font;
     Canvas canvas;
@@ -913,6 +960,358 @@ static void gpu_update_all(App *app)
         gpu_sample(&app->gpus[i], now);
 }
 
+static int size_to_kb(const char *s)
+{
+    int n = 0;
+    char unit = 0;
+    if (sscanf(s, "%d%c", &n, &unit) < 1)
+        return 0;
+    if (unit == 'M')
+        return n * 1024;
+    if (unit == 'G')
+        return n * 1024 * 1024;
+    return n;
+}
+
+static void sys_read_cpuinfo(SysCpu *c)
+{
+    FILE *f = fopen("/proc/cpuinfo", "r");
+    if (!f)
+        return;
+    char line[1024];
+    int processors = 0;
+    int phys_seen[256] = {0};
+    int core_seen = 0;
+    int phys = -1, core = -1;
+    while (fgets(line, sizeof(line), f)) {
+        char *colon = strchr(line, ':');
+        if (!colon)
+            continue;
+        *colon = '\0';
+        char *key = line;
+        while (*key == ' ' || *key == '\t')
+            key++;
+        char *kend = key + strlen(key);
+        while (kend > key && (kend[-1] == ' ' || kend[-1] == '\t'))
+            *--kend = '\0';
+        char *val = colon + 1;
+        while (*val == ' ' || *val == '\t')
+            val++;
+        char *end = val + strlen(val);
+        while (end > val && (end[-1] == '\n' || end[-1] == ' '))
+            *--end = '\0';
+        if (strcmp(key, "processor") == 0) {
+            processors++;
+        } else if (strcmp(key, "physical id") == 0) {
+            phys = atoi(val);
+            if (phys >= 0 && phys < 256)
+                phys_seen[phys] = 1;
+        } else if (strcmp(key, "core id") == 0) {
+            core = atoi(val);
+            (void)core;
+        } else if (strcmp(key, "model name") == 0 && !c->model[0]) {
+            snprintf(c->model, sizeof(c->model), "%s", val);
+        } else if (strcmp(key, "vendor_id") == 0 && !c->vendor[0]) {
+            snprintf(c->vendor, sizeof(c->vendor), "%s", val);
+        } else if (strcmp(key, "cpu family") == 0) {
+            c->family = atoi(val);
+        } else if (strcmp(key, "model") == 0) {
+            c->model_id = atoi(val);
+        } else if (strcmp(key, "stepping") == 0) {
+            c->stepping = atoi(val);
+        } else if (strcmp(key, "microcode") == 0 && !c->microcode[0]) {
+            snprintf(c->microcode, sizeof(c->microcode), "%s", val);
+        } else if (strcmp(key, "cpu cores") == 0) {
+            core_seen = atoi(val);
+        } else if (strcmp(key, "siblings") == 0) {
+            /* derived from processor count instead */
+        }
+    }
+    fclose(f);
+    c->threads = processors;
+    c->sockets = 0;
+    for (int i = 0; i < 256; i++)
+        if (phys_seen[i])
+            c->sockets++;
+    if (c->sockets < 1)
+        c->sockets = 1;
+    c->cores = core_seen > 0 ? core_seen * c->sockets : processors;
+    (void)phys;
+    (void)core;
+}
+
+static void sys_read_cache(SysCpu *c)
+{
+    char pattern[512];
+    snprintf(pattern, sizeof(pattern),
+             "/sys/devices/system/cpu/cpu0/cache/index*");
+    glob_t g;
+    if (glob(pattern, 0, NULL, &g) != 0)
+        return;
+    for (size_t i = 0; i < g.gl_pathc; i++) {
+        char path[640];
+        char level[16] = {0}, type[32] = {0}, size[32] = {0};
+        snprintf(path, sizeof(path), "%s/level", g.gl_pathv[i]);
+        if (read_text(path, level, sizeof(level)) == 0)
+            continue;
+        snprintf(path, sizeof(path), "%s/type", g.gl_pathv[i]);
+        if (read_text(path, type, sizeof(type)) == 0)
+            continue;
+        snprintf(path, sizeof(path), "%s/size", g.gl_pathv[i]);
+        if (read_text(path, size, sizeof(size)) == 0)
+            continue;
+        int kb = size_to_kb(size);
+        int lv = atoi(level);
+        if (lv == 1 && strcmp(type, "Data") == 0)
+            c->l1d_kb = kb;
+        else if (lv == 1 && strcmp(type, "Instruction") == 0)
+            c->l1i_kb = kb;
+        else if (lv == 2)
+            c->l2_kb = kb;
+        else if (lv == 3)
+            c->l3_kb = kb;
+    }
+    globfree(&g);
+}
+
+static void sys_read_power(SysCpu *c, double now)
+{
+    double limit;
+    if (read_scaled("/sys/class/powercap/intel-rapl:0/constraint_0_power_limit_uw",
+                    1e-6, &limit))
+        c->pl1_w = limit;
+    if (read_scaled("/sys/class/powercap/intel-rapl:0/constraint_1_power_limit_uw",
+                    1e-6, &limit))
+        c->pl2_w = limit;
+
+    uint64_t energy;
+    if (!read_u64("/sys/class/powercap/intel-rapl:0/energy_uj", &energy)) {
+        c->power_valid = 0;
+        c->power_w = NAN;
+        return;
+    }
+    int valid = 0;
+    if (c->last_energy_time > 0.0 && now > c->last_energy_time) {
+        double dt = now - c->last_energy_time;
+        if (energy >= c->last_energy_uj) {
+            c->power_w = (double)(energy - c->last_energy_uj) / 1e6 / dt;
+            valid = 1;
+        }
+    }
+    c->power_valid = valid;
+    c->last_energy_uj = energy;
+    c->last_energy_time = now;
+}
+
+static void sys_scan_hwmon(SysCpu *c, SysMem *m)
+{
+    glob_t g;
+    if (glob("/sys/class/hwmon/hwmon*", 0, NULL, &g) != 0)
+        return;
+    for (size_t i = 0; i < g.gl_pathc; i++) {
+        char path[640];
+        char name[64] = {0};
+        snprintf(path, sizeof(path), "%s/name", g.gl_pathv[i]);
+        if (read_text(path, name, sizeof(name)) == 0)
+            continue;
+        if (strcmp(name, "coretemp") == 0) {
+            int t;
+            snprintf(path, sizeof(path), "%s/temp1_input", g.gl_pathv[i]);
+            if (read_int_scaled(path, 1e-3, &t)) {
+                c->temp_c = t;
+                c->temp_valid = 1;
+            }
+        } else if (strcmp(name, "spd5118") == 0 && m->ndimms < 8) {
+            int t;
+            snprintf(path, sizeof(path), "%s/temp1_input", g.gl_pathv[i]);
+            if (read_int_scaled(path, 1e-3, &t))
+                m->dimm_temp[m->ndimms++] = (double)t;
+        }
+    }
+    globfree(&g);
+}
+
+static void sys_read_meminfo(SysMem *m)
+{
+    FILE *f = fopen("/proc/meminfo", "r");
+    if (!f)
+        return;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        char key[64];
+        unsigned long long val = 0;
+        if (sscanf(line, "%63[^:]: %llu", key, &val) != 2)
+            continue;
+        if (strcmp(key, "MemTotal") == 0) m->total_kb = val;
+        else if (strcmp(key, "MemFree") == 0) m->free_kb = val;
+        else if (strcmp(key, "MemAvailable") == 0) m->avail_kb = val;
+        else if (strcmp(key, "Buffers") == 0) m->buffers_kb = val;
+        else if (strcmp(key, "Cached") == 0) m->cached_kb = val;
+        else if (strcmp(key, "Active") == 0) m->active_kb = val;
+        else if (strcmp(key, "Inactive") == 0) m->inactive_kb = val;
+        else if (strcmp(key, "Dirty") == 0) m->dirty_kb = val;
+        else if (strcmp(key, "Writeback") == 0) m->writeback_kb = val;
+        else if (strcmp(key, "Shmem") == 0) m->shmem_kb = val;
+        else if (strcmp(key, "Slab") == 0) m->slab_kb = val;
+        else if (strcmp(key, "SReclaimable") == 0) m->sreclaim_kb = val;
+        else if (strcmp(key, "SUnreclaim") == 0) m->sunreclaim_kb = val;
+        else if (strcmp(key, "KernelStack") == 0) m->kstack_kb = val;
+        else if (strcmp(key, "PageTables") == 0) m->pagetables_kb = val;
+        else if (strcmp(key, "SwapTotal") == 0) m->swap_total_kb = val;
+        else if (strcmp(key, "SwapFree") == 0) m->swap_free_kb = val;
+    }
+    fclose(f);
+    uint64_t used = m->total_kb > m->avail_kb ? m->total_kb - m->avail_kb : 0;
+    m->used_pct = m->total_kb ? 100.0 * (double)used / (double)m->total_kb : 0.0;
+    uint64_t swap_used = m->swap_total_kb > m->swap_free_kb
+                             ? m->swap_total_kb - m->swap_free_kb : 0;
+    m->swap_pct = m->swap_total_kb
+                      ? 100.0 * (double)swap_used / (double)m->swap_total_kb : 0.0;
+}
+
+static void sys_read_load(SysCpu *c)
+{
+    FILE *f = fopen("/proc/stat", "r");
+    if (!f)
+        return;
+    char line[512];
+    if (fgets(line, sizeof(line), f)) {
+        unsigned long long v[8] = {0};
+        int n = sscanf(line,
+                       "cpu %llu %llu %llu %llu %llu %llu %llu %llu",
+                       &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]);
+        if (n >= 4) {
+            unsigned long long total = 0;
+            for (int i = 0; i < n && i < 8; i++)
+                total += v[i];
+            unsigned long long idle = v[3] + (n > 4 ? v[4] : 0);
+            if (c->prev_valid && total > c->prev_total) {
+                unsigned long long dt = total - c->prev_total;
+                unsigned long long di = idle - c->prev_idle;
+                if (dt > 0)
+                    c->load_pct = 100.0 * (double)(dt - di) / (double)dt;
+            }
+            c->prev_total = total;
+            c->prev_idle = idle;
+            c->prev_valid = 1;
+        }
+    }
+    fclose(f);
+
+    f = fopen("/proc/loadavg", "r");
+    if (f) {
+        if (fscanf(f, "%lf %lf %lf", &c->load1, &c->load5, &c->load15) != 3) {
+            c->load1 = c->load5 = c->load15 = NAN;
+        }
+        fclose(f);
+    }
+}
+
+static void sys_read_freq(SysCpu *c)
+{
+    int threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
+    if (threads < 1)
+        threads = 1;
+    double sum = 0.0;
+    int n = 0;
+    double max_cur = 0.0;
+    for (int i = 0; i < threads; i++) {
+        char path[256];
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq", i);
+        double khz;
+        if (read_scaled(path, 1.0, &khz)) {
+            double mhz = khz / 1000.0;
+            sum += mhz;
+            n++;
+            if (mhz > max_cur)
+                max_cur = mhz;
+        }
+    }
+    c->avg_mhz = n ? sum / n : 0.0;
+    c->cur_mhz = max_cur > 0.0 ? max_cur : c->avg_mhz;
+    c->threads = threads;
+
+    char path[256];
+    snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu0/cpufreq/scaling_driver");
+    if (!read_text(path, c->scaling_driver, sizeof(c->scaling_driver)))
+        c->scaling_driver[0] = '\0';
+    snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor");
+    if (!read_text(path, c->governor, sizeof(c->governor)))
+        c->governor[0] = '\0';
+    snprintf(path, sizeof(path),
+             "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference");
+    if (!read_text(path, c->epp, sizeof(c->epp)))
+        c->epp[0] = '\0';
+    snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq");
+    double khz;
+    if (read_scaled(path, 0.001, &khz))
+        c->min_mhz = khz;
+    snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq");
+    if (read_scaled(path, 0.001, &khz))
+        c->max_mhz = khz;
+    snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu0/cpufreq/base_frequency");
+    if (read_scaled(path, 0.001, &khz))
+        c->base_mhz = khz;
+    else
+        c->base_mhz = c->min_mhz;
+    snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu0/numa_node");
+    int node;
+    c->numa_nodes = read_int_scaled(path, 1.0, &node) && node >= 0 ? node + 1 : 0;
+}
+
+static void sys_sample(App *app, double now)
+{
+    SysCpu *c = &app->sys.cpu;
+    SysMem *m = &app->sys.mem;
+
+    sys_read_load(c);
+    sys_read_freq(c);
+    sys_read_power(c, now);
+    sys_read_meminfo(m);
+    sys_scan_hwmon(c, m);
+
+    if (c->last_hist_time <= 0.0 || now - c->last_hist_time >= 1.0) {
+        double values[TOP_METRICS];
+        values[0] = c->load_pct;
+        values[1] = c->cur_mhz / 1000.0;
+        values[2] = c->temp_valid ? (double)c->temp_c : NAN;
+        values[3] = c->power_valid ? c->power_w : NAN;
+        for (int i = 0; i < TOP_METRICS; i++) {
+            memmove(&c->hist[i][0], &c->hist[i][1],
+                    sizeof(c->hist[i][0]) * (HISTORY - 1));
+            c->hist[i][HISTORY - 1] = values[i];
+        }
+        c->last_hist_time = now;
+    }
+    if (m->last_hist_time <= 0.0 || now - m->last_hist_time >= 1.0) {
+        double values[TOP_METRICS];
+        values[0] = m->used_pct;
+        values[1] = m->total_kb ? (double)(m->total_kb - m->avail_kb) / (1024.0 * 1024.0) : NAN;
+        values[2] = m->avail_kb ? (double)m->avail_kb / (1024.0 * 1024.0) : NAN;
+        values[3] = m->swap_pct;
+        for (int i = 0; i < TOP_METRICS; i++) {
+            memmove(&m->hist[i][0], &m->hist[i][1],
+                    sizeof(m->hist[i][0]) * (HISTORY - 1));
+            m->hist[i][HISTORY - 1] = values[i];
+        }
+        m->last_hist_time = now;
+    }
+}
+
+static void sys_init(App *app)
+{
+    memset(&app->sys, 0, sizeof(app->sys));
+    SysCpu *c = &app->sys.cpu;
+    c->temp_c = -1;
+    c->power_w = NAN;
+    c->load1 = c->load5 = c->load15 = NAN;
+    sys_read_cpuinfo(c);
+    sys_read_cache(c);
+    sys_read_freq(c);
+    sys_sample(app, now_sec());
+}
+
 static void json_string(const char *s)
 {
     if (!s || !*s) {
@@ -947,8 +1346,56 @@ static void json_int(int v)
         printf("%d", v);
 }
 
+static void sys_probe(App *app, int json)
+{
+    double now = now_sec();
+    sys_sample(app, now);
+    usleep(2100000);
+    sys_sample(app, now_sec());
+    SysCpu *c = &app->sys.cpu;
+    SysMem *m = &app->sys.mem;
+    if (json) {
+        printf("{\"cpu\":{\"model\":");
+        json_string(c->model);
+        printf(",\"cores\":%d,\"threads\":%d,\"load_pct\":", c->cores, c->threads);
+        json_double(c->load_pct);
+        printf(",\"cur_mhz\":");
+        json_double(c->cur_mhz);
+        printf(",\"max_mhz\":");
+        json_double(c->max_mhz);
+        printf(",\"temp_c\":");
+        json_int(c->temp_valid ? c->temp_c : -1);
+        printf(",\"power_w\":");
+        json_double(c->power_valid ? c->power_w : NAN);
+        printf("},\"mem\":{\"total_kb\":%llu,\"avail_kb\":%llu,\"swap_total_kb\":%llu,"
+               "\"swap_free_kb\":%llu,\"used_pct\":",
+               (unsigned long long)m->total_kb, (unsigned long long)m->avail_kb,
+               (unsigned long long)m->swap_total_kb, (unsigned long long)m->swap_free_kb);
+        json_double(m->used_pct);
+        printf("}}\n");
+        return;
+    }
+    printf("%s  %dC/%dT  load %.0f%%  freq %.2f/%.2f GHz  temp %s%dC  power ",
+           c->model, c->cores, c->threads, c->load_pct, c->cur_mhz / 1000.0,
+           c->max_mhz / 1000.0, c->temp_valid ? "" : "-- ", c->temp_valid ? c->temp_c : 0);
+    if (c->power_valid)
+        printf("%.0fW\n", c->power_w);
+    else
+        printf("--\n");
+    printf("mem %.1f/%.1f GiB used  %.1f GiB avail  swap %.1f/%.1f GiB\n",
+           (double)(m->total_kb - m->avail_kb) / (1024.0 * 1024.0),
+           (double)m->total_kb / (1024.0 * 1024.0),
+           (double)m->avail_kb / (1024.0 * 1024.0),
+           (double)(m->swap_total_kb - m->swap_free_kb) / (1024.0 * 1024.0),
+           (double)m->swap_total_kb / (1024.0 * 1024.0));
+}
+
 static void probe(App *app, int json)
 {
+    if (app->system_mode) {
+        sys_probe(app, json);
+        return;
+    }
     gpu_update_all(app);
     usleep(2100000);
     gpu_update_all(app);
@@ -1441,7 +1888,7 @@ static const char *model_short(const char *model, char *buf, size_t n)
     return buf;
 }
 
-static void draw_range_dropdown(App *app, Gpu *g, int x, int y)
+static void draw_range_dropdown(App *app, int owner, int x, int y)
 {
     Canvas *c = &app->canvas;
     FontAtlas *f = &app->font;
@@ -1465,11 +1912,11 @@ static void draw_range_dropdown(App *app, Gpu *g, int x, int y)
         hit->y0 = y;
         hit->x1 = x + box_w;
         hit->y1 = y + box_h;
-        app->range_toggle_gpus[app->range_toggle_count] = g->index;
+        app->range_toggle_gpus[app->range_toggle_count] = owner;
         app->range_toggle_count++;
     }
 
-    if (!app->range_open || app->range_owner != g->index)
+    if (!app->range_open || app->range_owner != owner)
         return;
 
     int menu_h = item_h * RANGE_COUNT;
@@ -1657,7 +2104,7 @@ static void draw_gpu_block(App *app, Gpu *g, int x, int y, int w, int h)
         if (graph_h < 30)
             graph_h = 30;
         canvas_graph(c, x, gy, w, graph_h, hist, count, limit, C_ACCENT);
-        draw_range_dropdown(app, g, x, row_y);
+        draw_range_dropdown(app, g->index, x, row_y);
         return;
     }
 
@@ -1802,6 +2249,7 @@ static int compact_height(const App *app)
 }
 
 static void recreate_swapchain(App *app);
+static int sys_compact_px(App *app);
 
 static void set_compact(App *app, int compact)
 {
@@ -1811,7 +2259,7 @@ static void set_compact(App *app, int compact)
     int h;
     if (compact) {
         app->expanded_h = app->h;
-        h = compact_height(app);
+        h = app->system_mode ? sys_compact_px(app) : compact_height(app);
     } else {
         h = app->expanded_h > 0 ? app->expanded_h : app->h;
     }
@@ -1909,6 +2357,548 @@ static void draw_compact(App *app, int x, int y, int w, int H, int pad)
     draw_footer(app, x, w, H, pad);
 }
 
+static const char *cpu_model_short(const char *model)
+{
+    const char *p = strstr(model, "Core(TM) ");
+    if (p)
+        return p + 9;
+    p = strstr(model, "Core ");
+    if (p)
+        return p + 5;
+    return model;
+}
+
+static void sys_header(App *app, int x, int y, int w, const char *big,
+                       const char *l1, const char *l2)
+{
+    Canvas *c = &app->canvas;
+    int gl = text_px(app, big, 3.0f);
+    int w1 = text_px(app, l1, 1.0f);
+    int w2 = text_px(app, l2, 1.0f);
+    int bw = w1 > w2 ? w1 : w2;
+    int hx = centered_x(x, w, gl + 14 + bw);
+    canvas_text(c, hx, y, 3, C_ACCENT, big);
+    canvas_textf(c, hx + gl + 14, y + 6, 1, C_ACCENT, "%s", l1);
+    if (l2[0])
+        canvas_textf(c, hx + gl + 14, y + 32, 1, C_DIM, "%s", l2);
+}
+
+static int sys_metrics(App *app, int x, int y, int w,
+                       const char *labels[], double values[],
+                       const char *units[], double limits[],
+                       const int decimals[], int *slot_x, int *slot_w)
+{
+    Canvas *c = &app->canvas;
+    FontAtlas *f = &app->font;
+    int line = f->glyph_h + 8;
+    int label_w[TOP_METRICS];
+    int val_w[TOP_METRICS];
+    char val_str[TOP_METRICS][32];
+    int total_w = 0;
+    for (int i = 0; i < TOP_METRICS; i++) {
+        label_w[i] = text_px(app, labels[i], 1.0f);
+        if (isnan(values[i])) {
+            snprintf(val_str[i], sizeof(val_str[i]), "--");
+            val_w[i] = text_px(app, "--", 1.0f);
+        } else {
+            snprintf(val_str[i], sizeof(val_str[i]), "%.*f", decimals[i], values[i]);
+            val_w[i] = value_unit_px(app, val_str[i], units[i]);
+        }
+        slot_w[i] = label_w[i] > val_w[i] ? label_w[i] : val_w[i];
+        total_w += slot_w[i];
+    }
+    int gap = 14;
+    total_w += gap * (TOP_METRICS - 1);
+    int mx = centered_x(x, w, total_w);
+    int top_y = y;
+    for (int i = 0; i < TOP_METRICS; i++) {
+        slot_x[i] = mx;
+        Color col = app->graph_metric == i ? C_ACCENT : C_DIM;
+        int lx = mx + (slot_w[i] - label_w[i]) / 2;
+        canvas_text(c, lx, top_y, 1, col, labels[i]);
+        mx += slot_w[i] + gap;
+    }
+    y += line;
+    for (int i = 0; i < TOP_METRICS; i++) {
+        int vx = slot_x[i] + (slot_w[i] - val_w[i]) / 2;
+        if (isnan(values[i])) {
+            canvas_text(c, vx, y, 1, C_DIM, "--");
+        } else {
+            Color col = ramp_color(values[i], limits[i]);
+            canvas_value_unit_colored(c, vx, y, val_str[i], units[i], col, col);
+        }
+        if (app->metric_hit_count < MAX_CARDS * TOP_METRICS) {
+            HitRect *hit = &app->metric_hits[app->metric_hit_count];
+            hit->x0 = slot_x[i] - 2;
+            hit->y0 = top_y - 2;
+            hit->x1 = slot_x[i] + slot_w[i] + 2;
+            hit->y1 = y + f->glyph_h + 2;
+            app->metric_hit_metrics[app->metric_hit_count] = i;
+            app->metric_hit_count++;
+        }
+    }
+    return y + line + 4;
+}
+
+static int sys_tabs(App *app, int x, int y, int w)
+{
+    Canvas *c = &app->canvas;
+    FontAtlas *f = &app->font;
+    int line = f->glyph_h + 8;
+    static const char *tab_names[2] = {"GRAPH", "DETAILS"};
+    int t0 = text_px(app, tab_names[0], 1.0f);
+    int t1 = text_px(app, tab_names[1], 1.0f);
+    int gap = 32;
+    int tx[2];
+    tx[0] = centered_x(x, w, t0 + gap + t1);
+    tx[1] = tx[0] + t0 + gap;
+    for (int i = 0; i < 2; i++) {
+        canvas_text(c, tx[i], y, 1, app->tab == i ? C_ACCENT : C_DIM, tab_names[i]);
+        if (app->tab == i)
+            canvas_rect(c, (float)tx[i], (float)(y + f->glyph_h + 1),
+                        (float)(strlen(tab_names[i]) * f->advance), 1.0f, C_ACCENT);
+        if (app->tab_hit_count < MAX_CARDS * 2) {
+            HitRect *hit = &app->tab_hits[app->tab_hit_count];
+            hit->x0 = tx[i] - 2;
+            hit->y0 = y - 2;
+            hit->x1 = tx[i] + (int)(strlen(tab_names[i]) * f->advance) + 2;
+            hit->y1 = y + f->glyph_h + 4;
+            app->tab_hit_tabs[app->tab_hit_count] = i;
+            app->tab_hit_count++;
+        }
+    }
+    return y + line + 14;
+}
+
+static const double *sys_hist_for(App *app, int owner, int *count, double *limit,
+                                  char *max_label, size_t n)
+{
+    if (owner == 0) {
+        SysCpu *cpu = &app->sys.cpu;
+        if (app->graph_metric == 0) {
+            snprintf(max_label, n, "100%%");
+            *limit = 100.0;
+        } else if (app->graph_metric == 1) {
+            snprintf(max_label, n, "%.1fGHz", cpu->max_mhz / 1000.0);
+            *limit = cpu->max_mhz > 0 ? cpu->max_mhz / 1000.0 : 6.0;
+        } else if (app->graph_metric == 2) {
+            snprintf(max_label, n, "100C");
+            *limit = 100.0;
+        } else {
+            snprintf(max_label, n, "200W");
+            *limit = 200.0;
+        }
+        *count = RANGE_SAMPLES[app->graph_range];
+        if (*count > HISTORY)
+            *count = HISTORY;
+        return &cpu->hist[app->graph_metric][HISTORY - *count];
+    }
+    SysMem *mem = &app->sys.mem;
+    double total_gib = (double)mem->total_kb / (1024.0 * 1024.0);
+    if (app->graph_metric == 0) {
+        snprintf(max_label, n, "100%%");
+        *limit = 100.0;
+    } else if (app->graph_metric == 1) {
+        snprintf(max_label, n, "%.0fG", total_gib);
+        *limit = total_gib;
+    } else if (app->graph_metric == 2) {
+        snprintf(max_label, n, "%.0fG", total_gib);
+        *limit = total_gib;
+    } else {
+        snprintf(max_label, n, "100%%");
+        *limit = 100.0;
+    }
+    *count = RANGE_SAMPLES[app->graph_range];
+    if (*count > HISTORY)
+        *count = HISTORY;
+    return &mem->hist[app->graph_metric][HISTORY - *count];
+}
+
+static void sys_detail(App *app, int x, int y, const char *l1, const char *v1,
+                       const char *l2, const char *v2)
+{
+    Canvas *c = &app->canvas;
+    canvas_text_scaled(c, x, y, 0.75f, C_DIM, l1);
+    if (v1[0])
+        canvas_text_scaled(c, x + 38, y, 0.75f, C_TEXT, v1);
+    if (l2) {
+        canvas_text_scaled(c, x + 112, y, 0.75f, C_DIM, l2);
+        if (v2[0])
+            canvas_text_scaled(c, x + 150, y, 0.75f, C_TEXT, v2);
+    }
+}
+
+static int sys_detail_line(const App *app)
+{
+    return (int)(app->font.glyph_h * 0.75f + 0.5f) + 4;
+}
+
+static void fit_gib(char *buf, size_t n, uint64_t kb)
+{
+    snprintf(buf, n, "%.1f", (double)kb / (1024.0 * 1024.0));
+}
+
+static void fit_gib_g(char *buf, size_t n, uint64_t kb)
+{
+    snprintf(buf, n, "%.1fG", (double)kb / (1024.0 * 1024.0));
+}
+
+static void cache_str(char *buf, size_t n, int kb)
+{
+    if (kb >= 1024)
+        snprintf(buf, n, "%dM", kb / 1024);
+    else
+        snprintf(buf, n, "%dK", kb);
+}
+
+static void draw_sys_cpu_block(App *app, int x, int y, int w, int h)
+{
+    Canvas *c = &app->canvas;
+    FontAtlas *f = &app->font;
+    SysCpu *cpu = &app->sys.cpu;
+    int line = f->glyph_h + 8;
+    char second[64];
+    snprintf(second, sizeof(second), "%dC/%dT", cpu->cores, cpu->threads);
+    sys_header(app, x, y, w, "CPU0",
+               cpu->model[0] ? cpu_model_short(cpu->model) : "CPU", second);
+    y += 66;
+
+    const char *labels[TOP_METRICS] = {"LOAD", "FREQ", "TMP", "PWR"};
+    const char *units[TOP_METRICS] = {"%", "GHz", "C", "W"};
+    const int decimals[TOP_METRICS] = {0, 2, 0, 0};
+    double values[TOP_METRICS];
+    double limits[TOP_METRICS] = {100.0, cpu->max_mhz / 1000.0, 100.0, 200.0};
+    values[0] = cpu->load_pct;
+    values[1] = cpu->cur_mhz / 1000.0;
+    values[2] = cpu->temp_valid ? (double)cpu->temp_c : NAN;
+    values[3] = cpu->power_valid ? cpu->power_w : NAN;
+    int slot_x[TOP_METRICS], slot_w[TOP_METRICS];
+    y = sys_metrics(app, x, y, w, labels, values, units, limits, decimals, slot_x, slot_w);
+
+    canvas_rect(c, x, (float)y, (float)w, 1.0f, C_LINE);
+    y += 5;
+    y = sys_tabs(app, x, y, w);
+
+    if (app->tab == 0) {
+        int count;
+        double limit;
+        char max_label[32];
+        const double *hist = sys_hist_for(app, 0, &count, &limit, max_label, sizeof(max_label));
+        int max_x = x + w - text_px(app, max_label, 1.0f);
+        canvas_text(c, max_x, y, 1, C_DIM, max_label);
+        int row_y = y;
+        y += line;
+        canvas_graph(c, x, y, w, 135, hist, count, limit, C_ACCENT);
+        draw_range_dropdown(app, 0, x, row_y);
+        return;
+    }
+    (void)h;
+
+    int dl = sys_detail_line(app);
+    char v[64], v2[64], cores[32], sock[16], cache[64];
+    snprintf(v, sizeof(v), "%d/%d/%d", cpu->family, cpu->model_id, cpu->stepping);
+    sys_detail(app, x, y, "FMS", v, "UCD", cpu->microcode[0] ? cpu->microcode : "--");
+    y += dl;
+    snprintf(cores, sizeof(cores), "%d/%d", cpu->cores, cpu->threads);
+    snprintf(sock, sizeof(sock), "%d", cpu->sockets);
+    sys_detail(app, x, y, "COR", cores, "SCK", sock);
+    y += dl;
+    snprintf(v, sizeof(v), "%.2fGHz", cpu->avg_mhz / 1000.0);
+    snprintf(v2, sizeof(v2), "%.2fGHz", cpu->base_mhz / 1000.0);
+    sys_detail(app, x, y, "AVG", v, "BAS", v2);
+    y += dl;
+    sys_detail(app, x, y, "GOV", cpu->governor[0] ? cpu->governor : "--", NULL, NULL);
+    y += dl;
+    sys_detail(app, x, y, "DRV", cpu->scaling_driver[0] ? cpu->scaling_driver : "--", NULL, NULL);
+    y += dl;
+    sys_detail(app, x, y, "EPP", cpu->epp[0] ? cpu->epp : "--", NULL, NULL);
+    y += dl;
+    char c2[16], c3[16];
+    cache_str(c2, sizeof(c2), cpu->l2_kb);
+    cache_str(c3, sizeof(c3), cpu->l3_kb);
+    snprintf(cache, sizeof(cache), "L1 %d/%dK L2 %s L3 %s",
+             cpu->l1d_kb, cpu->l1i_kb, c2, c3);
+    sys_detail(app, x, y, "CAC", cache, NULL, NULL);
+    y += dl;
+    if (cpu->temp_valid)
+        snprintf(v, sizeof(v), "%dC", cpu->temp_c);
+    else
+        snprintf(v, sizeof(v), "--");
+    if (cpu->power_valid)
+        snprintf(v2, sizeof(v2), "%.0fW", cpu->power_w);
+    else
+        snprintf(v2, sizeof(v2), "--");
+    sys_detail(app, x, y, "TMP", v, "PWR", v2);
+    y += dl;
+    if (cpu->pl1_w > 0.0)
+        snprintf(v, sizeof(v), "%.0fW", cpu->pl1_w);
+    else
+        snprintf(v, sizeof(v), "--");
+    if (cpu->pl2_w > 0.0)
+        snprintf(v2, sizeof(v2), "%.0fW", cpu->pl2_w);
+    else
+        snprintf(v2, sizeof(v2), "--");
+    sys_detail(app, x, y, "PL1", v, "PL2", v2);
+    y += dl;
+    char lav[64];
+    if (isnan(cpu->load1))
+        snprintf(lav, sizeof(lav), "--");
+    else
+        snprintf(lav, sizeof(lav), "%.2f %.2f %.2f", cpu->load1, cpu->load5, cpu->load15);
+    sys_detail(app, x, y, "LAV", lav, NULL, NULL);
+}
+
+static void draw_sys_mem_block(App *app, int x, int y, int w, int h)
+{
+    Canvas *c = &app->canvas;
+    FontAtlas *f = &app->font;
+    SysMem *mem = &app->sys.mem;
+    int line = f->glyph_h + 8;
+    char second[64];
+    snprintf(second, sizeof(second), "%.0f GiB", (double)mem->total_kb / (1024.0 * 1024.0));
+    sys_header(app, x, y, w, "MEM0", "Memory", second);
+    y += 66;
+
+    const char *labels[TOP_METRICS] = {"USED", "USED", "AVL", "SWAP"};
+    const char *units[TOP_METRICS] = {"%", "GiB", "GiB", "%"};
+    const int decimals[TOP_METRICS] = {0, 0, 0, 0};
+    double total_gib = (double)mem->total_kb / (1024.0 * 1024.0);
+    double values[TOP_METRICS];
+    double limits[TOP_METRICS] = {100.0, total_gib, total_gib, 100.0};
+    values[0] = mem->used_pct;
+    values[1] = total_gib > 0.0 ? total_gib - (double)mem->avail_kb / (1024.0 * 1024.0) : NAN;
+    values[2] = (double)mem->avail_kb / (1024.0 * 1024.0);
+    values[3] = mem->swap_pct;
+    int slot_x[TOP_METRICS], slot_w[TOP_METRICS];
+    y = sys_metrics(app, x, y, w, labels, values, units, limits, decimals, slot_x, slot_w);
+
+    canvas_rect(c, x, (float)y, (float)w, 1.0f, C_LINE);
+    y += 5;
+    y = sys_tabs(app, x, y, w);
+
+    if (app->tab == 0) {
+        int count;
+        double limit;
+        char max_label[32];
+        const double *hist = sys_hist_for(app, 1, &count, &limit, max_label, sizeof(max_label));
+        int max_x = x + w - text_px(app, max_label, 1.0f);
+        canvas_text(c, max_x, y, 1, C_DIM, max_label);
+        int row_y = y;
+        y += line;
+        canvas_graph(c, x, y, w, 135, hist, count, limit, C_ACCENT);
+        draw_range_dropdown(app, 1, x, row_y);
+        return;
+    }
+
+    int dl = sys_detail_line(app);
+    char tot[32], use[32], avl[32], fre[32], buf[32], cac[32], act[32], ina[32];
+    fit_gib_g(tot, sizeof(tot), mem->total_kb);
+    uint64_t used_kb = mem->total_kb > mem->avail_kb ? mem->total_kb - mem->avail_kb : 0;
+    fit_gib_g(use, sizeof(use), used_kb);
+    fit_gib_g(avl, sizeof(avl), mem->avail_kb);
+    fit_gib_g(fre, sizeof(fre), mem->free_kb);
+    fit_gib_g(buf, sizeof(buf), mem->buffers_kb);
+    fit_gib_g(cac, sizeof(cac), mem->cached_kb);
+    fit_gib_g(act, sizeof(act), mem->active_kb);
+    fit_gib_g(ina, sizeof(ina), mem->inactive_kb);
+    sys_detail(app, x, y, "TOT", tot, "USE", use);
+    y += dl;
+    sys_detail(app, x, y, "AVL", avl, "FRE", fre);
+    y += dl;
+    sys_detail(app, x, y, "BUF", buf, "CAC", cac);
+    y += dl;
+    sys_detail(app, x, y, "ACT", act, "INA", ina);
+
+    char dirty[32], wb[32], shm[32], slab[32], kst[32], pgt[32], swt[32], swu[32];
+    fit_gib_g(dirty, sizeof(dirty), mem->dirty_kb);
+    fit_gib_g(wb, sizeof(wb), mem->writeback_kb);
+    fit_gib_g(shm, sizeof(shm), mem->shmem_kb);
+    fit_gib_g(slab, sizeof(slab), mem->slab_kb);
+    fit_gib_g(kst, sizeof(kst), mem->kstack_kb);
+    fit_gib_g(pgt, sizeof(pgt), mem->pagetables_kb);
+    fit_gib_g(swt, sizeof(swt), mem->swap_total_kb);
+    uint64_t swu_kb = mem->swap_total_kb > mem->swap_free_kb
+                          ? mem->swap_total_kb - mem->swap_free_kb : 0;
+    fit_gib_g(swu, sizeof(swu), swu_kb);
+    y += dl;
+    sys_detail(app, x, y, "DIR", dirty, "WRT", wb);
+    y += dl;
+    sys_detail(app, x, y, "SHM", shm, "SLB", slab);
+    y += dl;
+    sys_detail(app, x, y, "KST", kst, "PGT", pgt);
+    y += dl;
+    sys_detail(app, x, y, "SWT", swt, "SWU", swu);
+    y += dl;
+    if (mem->ndimms > 0) {
+        char t0[16], t1[16];
+        snprintf(t0, sizeof(t0), "%.1fC", mem->dimm_temp[0]);
+        if (mem->ndimms > 1)
+            snprintf(t1, sizeof(t1), "%.1fC", mem->dimm_temp[1]);
+        sys_detail(app, x, y, "DI0", t0, mem->ndimms > 1 ? "DI1" : NULL, t1);
+    }
+}
+
+static void draw_sys_footer(App *app, int x, int w, int H, int pad)
+{
+    Canvas *c = &app->canvas;
+    SysCpu *cpu = &app->sys.cpu;
+    SysMem *mem = &app->sys.mem;
+    int fy = H - pad - 34 + 2;
+    canvas_rect(c, x, (float)fy, (float)w, 1.0f, C_LINE);
+    char used[32], total[32], swu[32], swt[32];
+    fit_gib(used, sizeof(used), mem->total_kb > mem->avail_kb
+                                     ? mem->total_kb - mem->avail_kb : 0);
+    fit_gib(total, sizeof(total), mem->total_kb);
+    fit_gib(swu, sizeof(swu), mem->swap_total_kb > mem->swap_free_kb
+                                  ? mem->swap_total_kb - mem->swap_free_kb : 0);
+    fit_gib(swt, sizeof(swt), mem->swap_total_kb);
+    char line1[128], line2[128];
+    char power[32];
+    if (cpu->power_valid)
+        snprintf(power, sizeof(power), "%.0fW", cpu->power_w);
+    else
+        snprintf(power, sizeof(power), "--");
+    snprintf(line1, sizeof(line1), "PWR %s | MEM %sG/%sG", power, used, total);
+    snprintf(line2, sizeof(line2), "SWAP %sG/%sG", swu, swt);
+    int fx1 = centered_x(x, w, text_px(app, line1, 0.75f));
+    int fx2 = centered_x(x, w, text_px(app, line2, 0.75f));
+    canvas_text_scaled(c, fx1, fy + 3, 0.75f, C_ACCENT, line1);
+    canvas_text_scaled(c, fx2, fy + 3 + (int)(app->font.glyph_h * 0.75f) + 2,
+                       0.75f, C_DIM, line2);
+}
+
+static void draw_system_compact(App *app, int x, int y, int w, int H, int pad)
+{
+    Canvas *c = &app->canvas;
+    FontAtlas *f = &app->font;
+    int row = f->glyph_h + 8;
+    int gap = (int)(f->glyph_h * 0.75f + 0.5f) + 2;
+    SysCpu *cpu = &app->sys.cpu;
+    SysMem *mem = &app->sys.mem;
+
+    for (int owner = 0; owner < 2; owner++) {
+        const char *labels[TOP_METRICS];
+        const char *units[TOP_METRICS];
+        int decimals[TOP_METRICS];
+        double values[TOP_METRICS];
+        double limits[TOP_METRICS];
+        char title[128];
+        if (owner == 0) {
+            static const char *l[] = {"LOAD", "FREQ", "TMP", "PWR"};
+            static const char *u[] = {"%", "GHz", "C", "W"};
+            static const int d[] = {0, 2, 0, 0};
+            memcpy(labels, l, sizeof(l));
+            memcpy(units, u, sizeof(u));
+            memcpy(decimals, d, sizeof(d));
+            values[0] = cpu->load_pct;
+            values[1] = cpu->cur_mhz / 1000.0;
+            values[2] = cpu->temp_valid ? cpu->temp_c : NAN;
+            values[3] = cpu->power_valid ? cpu->power_w : NAN;
+            limits[0] = 100.0; limits[1] = cpu->max_mhz / 1000.0;
+            limits[2] = 100.0; limits[3] = 200.0;
+            snprintf(title, sizeof(title), "#0 %s %dC/%dT",
+                     cpu->model[0] ? cpu_model_short(cpu->model) : "CPU",
+                     cpu->cores, cpu->threads);
+        } else {
+            static const char *l[] = {"USED", "USED", "AVL", "SWAP"};
+            static const char *u[] = {"%", "GiB", "GiB", "%"};
+            static const int d[] = {0, 0, 0, 0};
+            memcpy(labels, l, sizeof(l));
+            memcpy(units, u, sizeof(u));
+            memcpy(decimals, d, sizeof(d));
+            double total_gib = (double)mem->total_kb / (1024.0 * 1024.0);
+            values[0] = mem->used_pct;
+            values[1] = total_gib - (double)mem->avail_kb / (1024.0 * 1024.0);
+            values[2] = (double)mem->avail_kb / (1024.0 * 1024.0);
+            values[3] = mem->swap_pct;
+            limits[0] = 100.0; limits[1] = total_gib;
+            limits[2] = total_gib; limits[3] = 100.0;
+            snprintf(title, sizeof(title), "#1 System Memory %.0fG", total_gib);
+        }
+
+        int label_w[TOP_METRICS], val_w[TOP_METRICS], slot_w[TOP_METRICS];
+        char vs[TOP_METRICS][32];
+        int total_w = 0;
+        for (int i = 0; i < TOP_METRICS; i++) {
+            label_w[i] = text_px(app, labels[i], 0.75f);
+            if (isnan(values[i])) {
+                snprintf(vs[i], sizeof(vs[i]), "--");
+                val_w[i] = text_px(app, "--", 1.0f);
+            } else {
+                snprintf(vs[i], sizeof(vs[i]), "%.*f", decimals[i], values[i]);
+                val_w[i] = value_unit_px(app, vs[i], units[i]);
+            }
+            slot_w[i] = label_w[i] > val_w[i] ? label_w[i] : val_w[i];
+            total_w += slot_w[i];
+        }
+        int sg = 12;
+        total_w += sg * (TOP_METRICS - 1);
+        int cx = centered_x(x, w, text_px(app, title, 1.0f));
+        canvas_text(c, cx, y, 1, C_ACCENT, title);
+        y += row;
+
+        int mx = centered_x(x, w, total_w);
+        int sx[TOP_METRICS];
+        for (int i = 0; i < TOP_METRICS; i++) {
+            sx[i] = mx;
+            Color col = app->graph_metric == i ? C_ACCENT : C_DIM;
+            int lx = sx[i] + (slot_w[i] - label_w[i]) / 2;
+            canvas_text_scaled(c, lx, y, 0.75f, col, labels[i]);
+            mx += slot_w[i] + sg;
+        }
+        y += gap;
+        for (int i = 0; i < TOP_METRICS; i++) {
+            int vx = sx[i] + (slot_w[i] - val_w[i]) / 2;
+            if (isnan(values[i])) {
+                canvas_text(c, vx, y, 1, C_DIM, "--");
+            } else {
+                Color col = ramp_color(values[i], limits[i]);
+                canvas_value_unit_colored(c, vx, y, vs[i], units[i], col, col);
+            }
+        }
+        y += row + 2;
+    }
+    if (app->hovered) {
+        const char *hint = "Double-click for details.";
+        canvas_text_scaled(c, centered_x(x, w, text_px(app, hint, 0.75f)), y,
+                           0.75f, C_DIM, hint);
+    }
+    draw_sys_footer(app, x, w, H, pad);
+}
+
+static int sys_compact_px(App *app)
+{
+    int row = app->font.glyph_h + 8;
+    int gap = (int)(app->font.glyph_h * 0.75f + 0.5f) + 2;
+    int rows = 2;
+    return 12 + rows * (2 * row + gap + 2) + row + 6 + 34 + 12;
+}
+
+static void draw_system_scene(App *app)
+{
+    int W = app->w;
+    int H = app->h;
+    int pad = 12;
+    int x = pad;
+    int y = pad;
+
+    if (app->compact) {
+        draw_system_compact(app, x, y, W - 2 * pad, H, pad);
+        return;
+    }
+
+    int footer_h = 34;
+    int avail = H - y - pad - footer_h;
+    int block_h = avail / 2;
+    if (block_h < 160)
+        block_h = 160;
+
+    draw_sys_cpu_block(app, x, y, W - 2 * pad, block_h);
+    y += block_h;
+    draw_sys_mem_block(app, x, y, W - 2 * pad, block_h);
+    draw_sys_footer(app, x, W - 2 * pad, H, pad);
+}
+
 static void draw_scene(App *app)
 {
     Canvas *c = &app->canvas;
@@ -1929,6 +2919,11 @@ static void draw_scene(App *app)
 
     int x = pad;
     int y = pad;
+
+    if (app->system_mode) {
+        draw_system_scene(app);
+        return;
+    }
 
     if (app->compact) {
         draw_compact(app, x, y, W - 2 * pad, H, pad);
@@ -2124,9 +3119,9 @@ static void x11_open(App *app)
     else if (app->opt.output)
         die("output %s is not connected", app->opt.output);
 
-    int x = ox + ow * 3 / 4;
+    int x = ox + (app->system_mode ? ow / 4 : ow * 3 / 4);
     int y = oy + oh / 2;
-    int w = ox + ow - x - 16;
+    int w = ow / 4 - 16;
     int h = oy + oh - y - 162;
 
     if (app->opt.x != INT_MIN)
@@ -3276,9 +4271,10 @@ static void usage(const char *argv0)
     printf("  --x N --y N          window position\n");
     printf("  --w N --h N          window size\n");
     printf("  --no-panel           text only, no background\n");
-    printf("  --no-click-through   make the window accept input\n");
+    printf("  --no-click-through   accept input (default: already on)\n");
     printf("  --managed            let the window manager manage the window\n");
-    printf("  --draggable          drag the window with the left mouse button\n");
+    printf("  --draggable          drag with the left mouse button (default)\n");
+    printf("  --system             show CPU and system memory instead of GPUs\n");
     printf("  --help               this text\n");
     printf("\n  SIGUSR1 toggles visibility; click tabs; Tab switches views;\n");
     printf("  double-click toggles compact mode; Ctrl-C quits.\n");
@@ -3299,6 +4295,7 @@ enum {
     OPT_NO_CLICK,
     OPT_MANAGED,
     OPT_DRAGGABLE,
+    OPT_SYSTEM,
     OPT_HELP
 };
 
@@ -3319,6 +4316,7 @@ static void parse_args(int argc, char **argv, Options *opt)
         {"no-click-through", no_argument, NULL, OPT_NO_CLICK},
         {"managed", no_argument, NULL, OPT_MANAGED},
         {"draggable", no_argument, NULL, OPT_DRAGGABLE},
+        {"system", no_argument, NULL, OPT_SYSTEM},
         {"help", no_argument, NULL, OPT_HELP},
         {NULL, 0, NULL, 0}
     };
@@ -3347,6 +4345,7 @@ static void parse_args(int argc, char **argv, Options *opt)
             opt->draggable = 1;
             opt->click_through = 0;
             break;
+        case OPT_SYSTEM: opt->system = 1; break;
         case OPT_HELP: usage(argv[0]); exit(0);
         case 'h': usage(argv[0]); exit(0);
         default: usage(argv[0]); exit(2);
@@ -3364,7 +4363,8 @@ int main(int argc, char **argv)
     opt.y = INT_MIN;
     opt.w = INT_MIN;
     opt.h = INT_MIN;
-    opt.click_through = 1;
+    opt.click_through = 0;
+    opt.draggable = 1;
     parse_args(argc, argv, &opt);
 
     if (opt.selftest)
@@ -3387,14 +4387,20 @@ int main(int argc, char **argv)
     App app;
     memset(&app, 0, sizeof(app));
     app.opt = opt;
-    app.ngpus = gpu_discover(app.gpus, MAX_CARDS);
+    app.system_mode = opt.system;
+    app.graph_metric = 0;
+    if (app.system_mode) {
+        sys_init(&app);
+    } else {
+        app.ngpus = gpu_discover(app.gpus, MAX_CARDS);
+    }
 
     if (opt.probe) {
         probe(&app, opt.json);
         return 0;
     }
 
-    if (app.ngpus == 0)
+    if (!app.system_mode && app.ngpus == 0)
         fprintf(stderr, "gpu_overlay: warning: no GPU telemetry cards found\n");
 
     x11_open(&app);
@@ -3406,7 +4412,10 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "gpu_overlay: %dx%d at %d,%d\n", app.w, app.h, app.x, app.y);
 
-    gpu_update_all(&app);
+    if (app.system_mode)
+        sys_sample(&app, now_sec());
+    else
+        gpu_update_all(&app);
     draw_scene(&app);
     if (render_frame(&app) != 0)
         fprintf(stderr, "gpu_overlay: first frame failed\n");
@@ -3578,7 +4587,10 @@ int main(int argc, char **argv)
         }
 
         if (t >= next_update) {
-            gpu_update_all(&app);
+            if (app.system_mode)
+                sys_sample(&app, t);
+            else
+                gpu_update_all(&app);
             next_update = t + opt.interval;
             dirty = 1;
         }

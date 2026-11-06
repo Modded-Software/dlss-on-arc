@@ -470,6 +470,10 @@ bench-coopmat: all
 gpu-overlay: ## Build the GPU telemetry overlay (X11 + Vulkan)
 	$(MAKE) -C src/overlay
 
+system-overlay: gpu-overlay ## Build the CPU/memory panel (same binary, --system)
+
+panels: gpu-overlay ## Build both panel modes
+
 install-gpu-overlay: gpu-overlay ## Install the overlay to $(PREFIX)/bin
 	$(MAKE) -C src/overlay install
 
@@ -478,6 +482,12 @@ deploy-gpu-overlay: gpu-overlay ## Deploy the overlay to ~/.local/bin
 
 run-gpu-overlay: gpu-overlay ## Run the GPU overlay with dragging enabled
 	$(MAKE) -C src/overlay run
+
+run-system-overlay: gpu-overlay ## Run the CPU/memory overlay with dragging enabled
+	$(MAKE) -C src/overlay run-system
+
+run-panels: gpu-overlay ## Run the GPU and CPU/memory panels together
+	( work/gpu_overlay & work/gpu_overlay --system & wait )
 
 test-gpu-overlay: gpu-overlay ## Run the headless GPU overlay tests
 	$(PYTHON) src/overlay/test_gpu_overlay.py
@@ -563,7 +573,7 @@ prepare-weights: work/nr_frame
 	mkdir -p work/mlxw
 	work/nr_frame --prepare work/mlxw/dlssnr-prepared.safetensors --weights work/mlxw/dlssnr-logical.safetensors
 
-.PHONY: all test test-metal test-ffn test-proton bench bench-coopmat publish-check prepare-weights gpu-overlay install-gpu-overlay deploy-gpu-overlay run-gpu-overlay test-gpu-overlay
+.PHONY: all test test-metal test-ffn test-proton bench bench-coopmat publish-check prepare-weights gpu-overlay system-overlay panels install-gpu-overlay deploy-gpu-overlay run-gpu-overlay run-system-overlay run-panels test-gpu-overlay
 
 # Per-backend GPU gate matrix (scripts/gpu-test.sh) and the interleaved HEAD/working-tree
 # frame A/B (scripts/ab-frame.sh). TIMEOUT per test; LABEL names notes/runs/ab-LABEL/.
